@@ -1,0 +1,156 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import stft
+from scipy.interpolate import interp1d
+
+# -------------------------------
+# 1. Simulate the Signal (for demonstration)
+# -------------------------------
+fs = 2000
+duration = 70
+t = np.linspace(0, duration, int(fs * duration), endpoint=False)
+f1 = 2.57
+f2 = 2.59
+harmonic_range = np.arange(15, 41)
+signal1 = np.zeros_like(t)
+signal2 = np.zeros_like(t)
+for n in harmonic_range:
+    signal1 += np.sin(2 * np.pi * n * f1 * t) * (1.0 + 0.01 * n)
+    signal2 += np.sin(2 * np.pi * n * f2 * t) * (1.0 + 0.01 * n)
+signal = signal1 + signal2
+noise = 0.1 * np.random.randn(len(t))
+signal += noise
+
+# -------------------------------
+# 2. Compute the Average Spectrum via STFT
+# -------------------------------
+win_duration = 8  # seconds
+win_length = int(fs * win_duration)
+hop_length = int(win_length / 2)
+f, time_stft, Zxx = stft(signal, fs, window='hann', nperseg=win_length, noverlap=hop_length)
+avg_magnitude = np.mean(np.abs(Zxx), axis=1)
+
+plt.figure(figsize=(10, 4))
+plt.plot(f, avg_magnitude)
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Amplitude")
+plt.title("Average Magnitude Spectrum")
+plt.xlim(0, 500)
+plt.show()
+
+# -------------------------------
+# 3. Define Candidate Grid and Compute Pitch Saliency Function
+# -------------------------------
+# Candidate grid: fundamentals from 1 Hz to 5 Hz, 400 candidate values.
+f_min_candidate = 1.0
+f_max_candidate = 5.0
+candidates = np.linspace(f_min_candidate, f_max_candidate, 400)
+
+# We consider harmonic orders n = 15 to 40.
+n_min = 15
+n_max = 40
+
+def compute_saliency(candidates, avg_magnitude, f, n_min, n_max):
+    """
+    For each candidate fundamental in 'candidates', sum the spectral magnitude (using
+    linear interpolation) at its expected harmonic frequencies (candidate * n for n from
+    n_min to n_max). Returns the saliency score vector.
+    """
+    # Create an interpolation function over the averaged spectrum.
+    interp_spectrum = interp1d(f, avg_magnitude, bounds_error=False, fill_value=0.0)
+    saliency_scores = np.zeros_like(candidates)
+    for i, candidate in enumerate(candidates):
+        salience = 0.0
+        for n in range(n_min, n_max + 1):
+            target = candidate * n
+            if target > f[-1]:
+                break
+            salience += interp_spectrum(target)
+        saliency_scores[i] = salience
+    return saliency_scores
+
+# Compute saliency scores on the average spectrum.
+saliency_scores = compute_saliency(candidates, avg_magnitude, f, n_min, n_max)
+
+plt.figure(figsize=(10, 4))
+plt.plot(candidates, saliency_scores)
+plt.xlabel("Candidate Fundamental (Hz)")
+plt.ylabel("Saliency Score")
+plt.title("Pitch Saliency Function")
+plt.show()
+
+# -------------------------------
+# 4. Refinement Function (Quadratic/Parabolic Interpolation)
+# -------------------------------
+def refine_peak(candidates, saliency_scores):
+    """
+    Refine the estimated fundamental frequency using quadratic interpolation.
+    
+    Assumes that 'candidates' is a uniformly spaced candidate grid and that
+    'saliency_scores' contains the computed saliency for each candidate.
+    
+    Process:
+      1. Find the index of the maximum saliency.
+      2. If not at the boundary, fit a parabola to the maximum and its neighbors.
+      3. Compute the vertex's offset (delta) and return the refined fundamental.
+    """
+    i_max = np.argmax(saliency_scores)
+    # Cannot refine if maximum is at the boundary.
+    if i_max == 0 or i_max == len(candidates) - 1:
+        return candidates[i_max]
+    
+    y1 = saliency_scores[i_max - 1]
+    y2 = saliency_scores[i_max]
+    y3 = saliency_scores[i_max + 1]
+    
+    # Assume uniform spacing d:
+    d = candidates[1] - candidates[0]
+    
+    # Quadratic interpolation formula for the vertex offset:
+    # delta = (y1 - y3) / (2*(y1 - 2*y2 + y3))
+    denominator = 2 * (y1 - 2 * y2 + y3)
+    if denominator == 0:
+        return candidates[i_max]
+    delta = (y1 - y3) / denominator
+    refined_candidate = candidates[i_max] + delta * d
+    return refined_candidate
+
+# Refine the first extraction.
+first_f0 = refine_peak(candidates, saliency_scores)
+print("First refined fundamental: {:.3f} Hz".format(first_f0))
+
+# -------------------------------
+# 5. Iterative Subtraction and Residual Pitch Saliency
+# -------------------------------
+# Subtract the first candidate's harmonic contributions from the averaged spectrum.
+residual_spectrum = avg_magnitude.copy()
+for n in range(n_min, n_max + 1):
+    target = first_f0 * n
+    if target > f[-1]:
+        break
+    idx = np.argmin(np.abs(f - target))
+    # Zero out the spectral magnitude at this harmonic.
+    residual_spectrum[idx] = 0
+
+# Compute the residual pitch saliency.
+interp_residual = interp1d(f, residual_spectrum, bounds_error=False, fill_value=0.0)
+saliency_scores_res = np.zeros_like(candidates)
+for i, candidate in enumerate(candidates):
+    salience = 0.0
+    for n in range(n_min, n_max + 1):
+        target = candidate * n
+        if target > f[-1]:
+            break
+        salience += interp_residual(target)
+    saliency_scores_res[i] = salience
+
+plt.figure(figsize=(10, 4))
+plt.plot(candidates, saliency_scores_res)
+plt.xlabel("Candidate Fundamental (Hz)")
+plt.ylabel("Residual Saliency Score")
+plt.title("Residual Pitch Saliency Function (After Subtraction)")
+plt.show()
+
+# Refine the second extraction.
+second_f0 = refine_peak(candidates, saliency_scores_res)
+print("Second refined fundamental: {:.3f} Hz".format(second_f0))
