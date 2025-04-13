@@ -120,17 +120,25 @@ first_f0 = refine_peak(candidates, saliency_scores)
 print("First refined fundamental: {:.3f} Hz".format(first_f0))
 
 # -------------------------------
-# 5. Iterative Subtraction and Residual Pitch Saliency
+# 5. Iterative Subtraction and Residual Pitch Saliency with Windowed Subtraction
 # -------------------------------
-# Subtract the first candidate's harmonic contributions from the averaged spectrum.
+def subtract_harmonic(spectrum, f, target, window_width=2.0):
+    """
+    Instead of zeroing only the nearest bin, subtract all frequency bins
+    within ±window_width/2 Hz around the target frequency.
+    """
+    residual = spectrum.copy()
+    indices = np.where(np.abs(f - target) < (window_width / 2))[0]
+    residual[indices] = 0.0
+    return residual
+
 residual_spectrum = avg_magnitude.copy()
+# Instead of a single bin subtraction, we subtract over a window.
 for n in range(n_min, n_max + 1):
     target = first_f0 * n
     if target > f[-1]:
         break
-    idx = np.argmin(np.abs(f - target))
-    # Zero out the spectral magnitude at this harmonic.
-    residual_spectrum[idx] = 0
+    residual_spectrum = subtract_harmonic(residual_spectrum, f, target, window_width=2.0)
 
 # Compute the residual pitch saliency.
 interp_residual = interp1d(f, residual_spectrum, bounds_error=False, fill_value=0.0)
