@@ -65,4 +65,56 @@ namespace Helper
 
         return audioData;
     }
+
+    std::vector<float> readWavFile(const std::string& filePath)
+    {
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file)
+        {
+            throw std::runtime_error("Could not open file");
+        }
+
+        WavHeader header;
+        file.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+        // Verify the WAV file format
+        if (std::string(header.riff, 4) != "RIFF" ||
+            std::string(header.wave, 4) != "WAVE" ||
+            std::string(header.fmt, 4) != "fmt ")
+        {
+            throw std::runtime_error("Invalid WAV file");
+        }
+
+        // Verify IEEE Float format (format 3) and 32-bit samples
+        if (header.format != 3 || header.bitsPerSample != 32)
+        {
+            throw std::runtime_error("Unsupported WAV file format");
+        }
+
+        // Skip any extra fmt bytes
+        if (header.fmtSize > 16)
+        {
+            file.seekg(header.fmtSize - 16, std::ios::cur);
+        }
+
+        // Find the "data" chunk
+        char chunkId[4];
+        uint32_t dataSize;
+        while (file.read(chunkId, 4))
+        {
+            file.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
+            if (std::string(chunkId, 4) == "data")
+            {
+                break;
+            }
+            // Skip over the chunk if it's not "data"
+            file.seekg(dataSize, std::ios::cur);
+        }
+
+        // Read audio data (32-bit floating point samples)
+        std::vector<float> audioData(dataSize / sizeof(float));
+        file.read(reinterpret_cast<char*>(audioData.data()), dataSize);
+
+        return audioData;
+    }
 }
