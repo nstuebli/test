@@ -118,6 +118,12 @@ def pitch_from_cepstrum(signal, fs, min_quefrency_sec=0.002, max_quefrency_sec=0
     
     return fundamental_freq, cepstrum, quefrency_axis
 
+def compute_cepstrum(signal, fs):
+    spectrum = np.fft.fft(signal)
+    log_magnitude = np.log(np.abs(spectrum) + np.finfo(float).eps)
+    cepstrum = np.fft.ifft(log_magnitude).real
+    return cepstrum
+
 def short_time_cepstrum(signal, fs, segment_length, overlap, window_type='hann', lifter_index=0):
     step = segment_length - overlap
     segments = []
