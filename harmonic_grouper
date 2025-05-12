@@ -1,0 +1,78 @@
+#include <iostream>
+#include <vector>
+#include <unordered_map>
+
+// Define your harmonic structure.
+struct Harmonic {
+    int level;
+    double frequency;
+    int harmonicNumber;
+
+    // Helper for printing (optional)
+    friend std::ostream& operator<<(std::ostream& os, const Harmonic& h) {
+        os << h.harmonicNumber;
+        return os;
+    }
+};
+
+// This function returns a vector of vectors.
+// Each inner vector corresponds to an "occurrence" of a harmonic number.
+std::vector<std::vector<Harmonic>> groupHarmonics(const std::vector<Harmonic>& harmonics) {
+    // Each inner vector holds the nth occurrence (n=1,2,3,...) of any harmonic.
+    std::vector<std::vector<Harmonic>> result;
+    // Map to track how many times we have seen a given harmonic number.
+    std::unordered_map<int, int> occurrenceCount;
+
+    for (const auto& h : harmonics) {
+        // Exclude harmonics with number 0.
+        if (h.harmonicNumber == 0) 
+            continue;
+
+        // Determine which occurrence this is.
+        int occurrence = occurrenceCount[h.harmonicNumber];
+
+        // Ensure the result vector is long enough.
+        if (result.size() <= static_cast<size_t>(occurrence)) {
+            result.resize(occurrence + 1);
+        }
+        // Place the current harmonic into the appropriate vector.
+        result[occurrence].push_back(h);
+        // Increment the occurrence counter for this harmonic number.
+        occurrenceCount[h.harmonicNumber]++;
+    }
+
+    return result;
+}
+
+// A simple test case
+int main() {
+    // Let's build a vector containing harmonic numbers.
+    // For simplicity, the 'level' and 'frequency' fields are set arbitrarily.
+    std::vector<Harmonic> harmonics = {
+        {0, 0.0, 1},
+        {0, 0.0, 2},
+        {0, 0.0, 2},
+        {0, 0.0, 3},
+        {0, 0.0, 4},
+        {0, 0.0, 5},
+        {0, 0.0, 5},
+        {0, 0.0, 5},
+        {0, 0.0, 6},
+        {0, 0.0, 6},
+        // Including a harmonic with number 0; this will be excluded.
+        {0, 0.0, 0}
+    };
+
+    auto grouped = groupHarmonics(harmonics);
+
+    // Output the resulting groups.
+    // Each group (vector) represents the 1st, 2nd, 3rd, ... occurrences.
+    for (size_t i = 0; i < grouped.size(); ++i) {
+        std::cout << "Occurrence " << (i + 1) << ": ";
+        for (const auto& h : grouped[i]) {
+            std::cout << h.harmonicNumber << " ";
+        }
+        std::cout << std::endl;
+    }
+    return 0;
+}
