@@ -118,6 +118,25 @@ def pitch_from_cepstrum(signal, fs, min_quefrency_sec=0.002, max_quefrency_sec=0
     
     return fundamental_freq, cepstrum, quefrency_axis
 
+def short_time_cepstrum(signal, fs, segment_length, overlap, window_type='hann', lifter_index=0):
+    step = segment_length - overlap
+    segments = []
+    cepstra = []
+    for start in range(0, len(signal) - segment_length + 1, step):
+        segment = signal[start:start + segment_length]
+        window = get_window(window_type, segment_length)
+        segment = segment * window
+        cep = compute_cepstrum(segment, fs)
+        # Optionally apply liftering to emphasize pitch-related peaks
+        if lifter_index > 0:
+            cep = lifter_cepstrum(cep, lifter_index)
+        cepstra.append(cep)
+        segments.append(segment)
+    
+    # For demonstration, average the cepstra:
+    avg_cepstrum = np.mean(cepstra, axis=0)
+    return avg_cepstrum, cepstra
+
 if __name__ == "__main__":
     # Parameters
     fs = 2000          # Sampling frequency in Hz
