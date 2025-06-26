@@ -78,3 +78,100 @@ for (int i = start; i < stop; ++i)
     output[i] += tmp[0] + tmp[1] + tmp[2] + tmp[3]
                + tmp[4] + tmp[5] + tmp[6] + tmp[7];
 }
+
+----------------------------------------------------
+
+// reflect policy: mirror at [0…N-1]
+static inline int reflect_index(int idx, int N) {
+    if (idx < 0)      return -idx;
+    if (idx >= N)     return 2*(N - 1) - idx;
+    return idx;
+}
+
+----------------------------------------------------
+
+const int inputSize   = int(input.size());
+    const int kernelSize  = int(m_FIRCoefficiants.size());
+    const int D           = m_DownSampling;
+
+    // Prepare output (might be pre-sized to inputSize/D)
+    // output.assign(output.size(), 0.0f);  
+    // but we’ll zero per-sample below
+
+    // precompute the two “cut points” where full‐width AVX is in‐bounds
+    int mid1 = (kernelSize - 1 + D - 1) / D;      // ceil((kernelSize-1)/D)
+    int mid2 = (inputSize - 1) / D;               // floor((N-1)/D)
+    mid1 = std::max(mid1, start);
+    mid2 = std::min(mid2, stop);
+
+    // constant index‐reversal for the AVX epilogue sum and the backward window
+    const __m256i REV_IDX = _mm256_setr_epi32(7,6,5,4,3,2,1,0);
+
+    // ----------------------------------------------------------
+    // 1) Prologue: scalar convolution with reflect
+    for (int i = start; i < mid1; ++i)
+    {
+        float acc = 0.0f;
+        int baseSample = i * D;
+        for (int j = 0; j < kernelSize; ++j)
+        {
+            int idx = baseSample - j;
+            idx = reflect_index(idx, inputSize);
+            acc += input[idx] * m_FIRCoefficiants[j];
+        }
+        output[i] = acc;
+    }
+
+    // ----------------------------------------------------------
+    // 2) Middle: branch‐free AVX + FMA + in-register horizontal sum
+    for (int i = mid1; i < mid2; ++i)
+    {
+        // 2a) zero accumulator
+        __m256 sum = _mm256_setzero_ps();
+        int baseSample = i * D;
+
+        // 2b) vector body, 8 taps at a time, NO inner 'if'
+        for (int j = 0; j + 8 <= kernelSize; j += 8)
+        {
+            // we want samples [baseSample - (j+0) … baseSample - (j+7)]
+            // so load the block starting at (baseSample - j - 7) and reverse it
+            const int b0 = baseSample - j - 7;
+            __m256 inBlk  = _mm256_loadu_ps(&input[b0]);          // unaligned OK
+            inBlk          = _mm256_permutevar8x32_ps(inBlk, REV_IDX);
+            __m256 kBlk   = _mm256_loadu_ps(&m_FIRCoefficiants[j]);
+            sum            = _mm256_fmadd_ps(inBlk, kBlk, sum);
+        }
+
+        // 2c) horizontal sum of sum[0..7] → fAcc
+        //    sumHi = sum[4..7], sumLo = sum[0..3]
+        __m128 lo     = _mm256_castps256_ps128(sum);
+        __m128 hi     = _mm256_extractf128_ps(sum, 1);
+        __m128 s128   = _mm_add_ps(lo, hi);            // [ s0+s4, s1+s5, s2+s6, s3+s7 ]
+        s128          = _mm_hadd_ps(s128, s128);       // [ (s0+s4+s1+s5), (s2+s6+s3+s7), … ]
+        s128          = _mm_hadd_ps(s128, s128);       // all lanes = total sum
+        float fAcc    = _mm_cvtss_f32(s128);
+
+        // 2d) scalar tail for j % 8 != 0
+        int tail = (kernelSize & ~7);
+        for (int j = tail; j < kernelSize; ++j) 
+        {
+            fAcc += input[baseSample - j] * m_FIRCoefficiants[j];
+        }
+
+        output[i] = fAcc;
+    }
+
+    // ----------------------------------------------------------
+    // 3) Epilogue: scalar convolution with reflect
+    for (int i = mid2; i < stop; ++i)
+    {
+        float acc = 0.0f;
+        int baseSample = i * D;
+        for (int j = 0; j < kernelSize; ++j)
+        {
+            int idx = baseSample - j;
+            idx = reflect_index(idx, inputSize);
+            acc += input[idx] * m_FIRCoefficiants[j];
+        }
+        output[i] = acc;
+    }
