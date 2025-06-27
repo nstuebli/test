@@ -175,3 +175,18 @@ const int inputSize   = int(input.size());
         }
         output[i] = acc;
     }
+
+
+==================
+for (int i = start; i < mid1; ++i)
+    {
+        float acc = 0.0f;
+        int baseSample = i * D;
+        for (int j = 0; j < kernelSize; ++j)
+        {
+            int idx = baseSample - j;
+            idx = reflectIndex(idx, inputSize);
+            acc += input[idx] * m_FIRCoefficiants[j];
+        }
+        output[i] = acc;
+    }
