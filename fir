@@ -190,3 +190,85 @@ for (int i = start; i < mid1; ++i)
         }
         output[i] = acc;
     }
+
+=======
+
+const int  inputSize  = int(input.size());
+    const int  kernelSize = int(m_FIRCoefficiants.size());
+    const int  D          = m_DownSampling;
+
+    // determine where a full-length (kernelSize) block fits entirely in [0..inputSize)
+    int mid1 = (kernelSize - 1 + D - 1) / D;   // ceil((kernelSize-1)/D)
+    int mid2 = (inputSize - 1) / D;            // floor((inputSize-1)/D)
+    mid1 = std::max(mid1, start);
+    mid2 = std::min(mid2, stop);
+
+    // precompute for in-register reverse of 8-wide loads
+    const __m256i REV_IDX = _mm256_setr_epi32(7,6,5,4,3,2,1,0);
+
+    // 1) Prologue: scalar, zero-pad out-of-bounds
+    for (int i = start; i < mid1; ++i) 
+    {
+        float acc = 0.0f;
+        int baseSample = i * D;
+        for (int j = 0; j < kernelSize; ++j) 
+        {
+            int idx = baseSample - j;
+            if (idx < 0 || idx >= inputSize) 
+                continue;                    // zero-pad
+            acc += input[idx] * m_FIRCoefficiants[j];
+        }
+        output[i] = acc;
+    }
+
+    // 2) Middle: branch-free AVX + FMA + in-register horizontal sum
+    for (int i = mid1; i < mid2; ++i) 
+    {
+        int baseSample = i * D;
+
+        // 2a) AVX accumulate
+        __m256 sum = _mm256_setzero_ps();
+        for (int j = 0; j + 8 <= kernelSize; j += 8) 
+        {
+            // load samples [baseSample-(j+7) … baseSample-j]
+            int b0 = baseSample - j - 7;
+            __m256 inBlk = _mm256_loadu_ps(&input[b0]);
+            inBlk = _mm256_permutevar8x32_ps(inBlk, REV_IDX);
+
+            __m256 kBlk = _mm256_loadu_ps(&m_FIRCoefficiants[j]);
+            sum = _mm256_fmadd_ps(inBlk, kBlk, sum);
+        }
+
+        // 2b) horizontal sum: collapse sum[0..7] → fAcc
+        __m128 lo   = _mm256_castps256_ps128(sum);
+        __m128 hi   = _mm256_extractf128_ps(sum, 1);
+        __m128 s128 = _mm_add_ps(lo, hi);
+        s128        = _mm_hadd_ps(s128, s128);
+        s128        = _mm_hadd_ps(s128, s128);
+        float fAcc  = _mm_cvtss_f32(s128);
+
+        // 2c) scalar tail (<8 taps), always in-bounds in this “middle” region
+        int tail = kernelSize & ~7;
+        for (int j = tail; j < kernelSize; ++j) 
+        {
+            int idx = baseSample - j;      // guaranteed 0<=idx<inputSize
+            fAcc += input[idx] * m_FIRCoefficiants[j];
+        }
+
+        output[i] = fAcc;
+    }
+
+    // 3) Epilogue: scalar, zero-pad out-of-bounds
+    for (int i = mid2; i < stop; ++i) 
+    {
+        float acc = 0.0f;
+        int baseSample = i * D;
+        for (int j = 0; j < kernelSize; ++j) 
+        {
+            int idx = baseSample - j;
+            if (idx < 0 || idx >= inputSize) 
+                continue;                    // zero-pad
+            acc += input[idx] * m_FIRCoefficiants[j];
+        }
+        output[i] = acc;
+    }
