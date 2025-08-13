@@ -1,0 +1,206 @@
+#include <vector>
+#include <algorithm>  // for std::max
+
+// Raw peak in one frame
+struct Peak {
+    float frequency;
+    float amplitude;
+    int harmonicNo;    // 0 = not a harmonic, 1 = first, 2 = second, …
+};
+
+// Time‐indexed sample for one harmonic
+struct TrackData {
+    size_t index;      // frame/time index
+    float frequency;
+    float amplitude;
+};
+
+// Build tracks: one vector<TrackData> per harmonicNo (1…maxHarmonic)
+std::vector<std::vector<TrackData>> generateTracks(
+    const std::vector<std::vector<Peak>>& allPeaks)
+{
+    // 1. Find highest harmonic number
+    int maxHarmonic = 0;
+    for (const auto& frame : allPeaks) {
+        for (const auto& p : frame) {
+            if (p.harmonicNo > maxHarmonic) {
+                maxHarmonic = p.harmonicNo;
+            }
+        }
+    }
+
+    // 2. Prepare one track per harmonic > 0; ignore index 0
+    std::vector<std::vector<TrackData>> tracks(maxHarmonic + 1);
+
+    // 3. Fill tracks
+    for (size_t i = 0; i < allPeaks.size(); ++i) {
+        for (const auto& p : allPeaks[i]) {
+            if (p.harmonicNo > 0) {
+                tracks[p.harmonicNo].push_back(
+                    TrackData{ i, p.frequency, p.amplitude }
+                );
+            }
+        }
+    }
+
+    // Optionally remove the empty 0th bucket
+    tracks.erase(tracks.begin());
+    return tracks;  // tracks[0] = first harmonic, tracks[1] = second, etc.
+}
+
+// Example usage
+int main() {
+    std::vector<std::vector<Peak>> allPeaks = /* … load or compute … */;
+    auto tracks = generateTracks(allPeaks);
+
+    // tracks[0] holds the first harmonic’s TrackData entries over time
+    // tracks[1] holds the second harmonic, and so on.
+}
+
+=======================================================================================
+
+#include <vector>
+#include <unordered_map>
+#include <cmath>       // for std::abs
+#include <limits>      // for std::numeric_limits
+
+struct Peak {
+    float frequency;
+    float amplitude;
+    int harmonicNo;    // 0 = not harmonic, 1 = first, 2 = second, …
+};
+
+struct TrackData {
+    size_t index;      // frame/time index
+    float frequency;
+    float amplitude;
+};
+
+// Build tracks with tie-breaking:
+// 1) highest amplitude
+// 2) if amplitudes equal, choose frequency closest to previous frame’s frequency
+std::vector<std::vector<TrackData>> generateTracks(
+    const std::vector<std::vector<Peak>>& allPeaks)
+{
+    // 1. Find maximum harmonic number across all frames
+    int maxHarmonic = 0;
+    for (auto const& frame : allPeaks) {
+        for (auto const& p : frame) {
+            maxHarmonic = std::max(maxHarmonic, p.harmonicNo);
+        }
+    }
+
+    // 2. Prepare one track per harmonic > 0 (index 0 unused)
+    std::vector<std::vector<TrackData>> tracks(maxHarmonic + 1);
+
+    // 3. Keep last chosen frequency for each harmonic to break ties
+    std::vector<float> lastFreq(maxHarmonic + 1,
+                                std::numeric_limits<float>::quiet_NaN());
+
+    // 4. Iterate frames
+    for (size_t frameIdx = 0; frameIdx < allPeaks.size(); ++frameIdx) {
+        // Map harmonicNo → best candidate in this frame
+        std::unordered_map<int, Peak> bestInFrame;
+
+        for (auto const& p : allPeaks[frameIdx]) {
+            if (p.harmonicNo <= 0) 
+                continue;
+
+            auto it = bestInFrame.find(p.harmonicNo);
+            if (it == bestInFrame.end()) {
+                // first candidate for this harmonic
+                bestInFrame[p.harmonicNo] = p;
+            }
+            else {
+                Peak& currentBest = it->second;
+
+                // Tie-breaker: higher amplitude wins
+                if (p.amplitude > currentBest.amplitude) {
+                    currentBest = p;
+                }
+                else if (p.amplitude == currentBest.amplitude) {
+                    // Secondary: closer in frequency to last chosen
+                    float last = lastFreq[p.harmonicNo];
+                    if (!std::isnan(last)) {
+                        float dNew = std::abs(p.frequency - last);
+                        float dOld = std::abs(currentBest.frequency - last);
+                        if (dNew < dOld) {
+                            currentBest = p;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Commit each best peak into its track, update lastFreq
+        for (auto const& kv : bestInFrame) {
+            int h = kv.first;
+            const Peak& chosen = kv.second;
+            tracks[h].push_back({ frameIdx,
+                                  chosen.frequency,
+                                  chosen.amplitude });
+            lastFreq[h] = chosen.frequency;
+        }
+    }
+
+    // 6. Discard the 0th slot so result[0] is harmonic 1, result[1] is harmonic 2,…
+    tracks.erase(tracks.begin());
+    return tracks;
+}
+
+=======================================================================================
+
+std::map<int, std::vector<TrackData>> tracks;
+// Insert for harmonic h
+tracks[h].push_back({ index, freq, amp });
+
+=======================================================================================
+
+struct KalmanFilter1D {
+    float x;    // state estimate (frequency)
+    float P;    // estimate covariance
+    float Q;    // process noise covariance
+    float R;    // measurement noise covariance
+
+    KalmanFilter1D(float init_x, float init_P,
+                   float processNoise, float measNoise)
+      : x(init_x), P(init_P), Q(processNoise), R(measNoise) {}
+
+    // Incorporate a new measurement z and return smoothed estimate
+    float update(float z) {
+        // Predict
+        P += Q;
+
+        // Compute Kalman gain
+        float K = P / (P + R);
+
+        // Update estimate
+        x += K * (z - x);
+
+        // Update covariance
+        P *= (1.0f - K);
+
+        return x;
+    }
+};
+
+=======================================================================================
+
+void smoothTracksWithKalman(
+    std::map<int, std::vector<TrackData>>& tracks,
+    float processNoise, float measNoise)
+{
+    for (auto& [harmonic, data] : tracks) {
+        if (data.empty()) continue;
+        // Initialize filter with first measurement
+        KalmanFilter1D kf(data[0].frequency,
+                          /* P0= */1.0f,
+                          processNoise, measNoise);
+
+        for (auto& pt : data) {
+            pt.frequency = kf.update(pt.frequency);
+        }
+    }
+}
+
+=======================================================================================
