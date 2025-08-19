@@ -56,3 +56,69 @@ void CPAFinder::createTracks()
             }
         }
     }
+
+
+
+
+
+
+
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Callable
+
+@dataclass
+class Peak:
+    PeakFrequency: float
+    PeakLevel: float
+    PeakHarmonicNo: int = 0
+
+@dataclass
+class TrackData:
+    time_idx: int
+    frequency: float
+    level: float
+
+def build_tracks(
+    spectrogram: List[np.ndarray],
+    mean_peaks: List[Peak],
+    find_peaks_fn: Callable[[np.ndarray], List[Peak]],
+    freq_tolerance: float = 0.075
+) -> List[List[TrackData]]:
+    """
+    Port of the C++ logic into Python.  
+    - spectrogram: list of 1D numpy arrays (one per time‐bin)  
+    - mean_peaks:  list of Peaks from the averaged spectrum  
+    - find_peaks_fn: function that returns List[Peak] for one frame  
+    - freq_tolerance: Δf threshold for matching peaks  
+    """
+
+    # 1. Number the master peaks 1..N
+    for idx, peak in enumerate(mean_peaks):
+        peak.PeakHarmonicNo = idx + 1
+
+    # 2. How many harmonics do we have?
+    max_harmonic = max(p.PeakHarmonicNo for p in mean_peaks)
+
+    # 3. Prepare an empty track for each harmonic
+    track_list: List[List[TrackData]] = [[] for _ in range(max_harmonic)]
+
+    # 4. Go through each time‐bin, detect & assign
+    for t_idx, frame in enumerate(spectrogram):
+        frame_peaks = find_peaks_fn(frame)
+
+        # assign each detected peak to the nearest master peak (if within tolerance)
+        for m in mean_peaks:
+            for p in frame_peaks:
+                if abs(p.PeakFrequency - m.PeakFrequency) < freq_tolerance:
+                    p.PeakHarmonicNo = m.PeakHarmonicNo
+                    break
+
+        # fill the tracks
+        for p in frame_peaks:
+            if p.PeakHarmonicNo > 0:
+                track_list[p.PeakHarmonicNo - 1].append(
+                    TrackData(time_idx=t_idx, frequency=p.PeakFrequency, level=p.PeakLevel)
+                )
+
+    return track_list
