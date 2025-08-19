@@ -1,0 +1,58 @@
+void CPAFinder::createTracks()
+{
+    PeakFinder peakFinder(m_Spectrogram);
+    Peaks meanPeaks = peakFinder.getPeaks(TimeRange{ 0, m_Spectrogram.m_Spectrogram.size() }, 3.0f);
+    Spectrum spectrumBuffer;
+    std::vector<float> kernel = Vectormath::generateGaussianKernel(3.0f);
+
+    // 1. Find highest harmonic number
+
+    for (size_t i = 0u; i < meanPeaks.m_Peaks.size(); ++i)
+    {
+        meanPeaks.m_Peaks[i].PeakHarmonicNo = i + 1;
+    }
+
+    int maxHarmonic = 0;
+    for (const Peak& peak : meanPeaks.m_Peaks)
+    {
+        if (peak.PeakHarmonicNo > maxHarmonic)
+        {
+            maxHarmonic = peak.PeakHarmonicNo;
+        }
+    }
+
+    // 2. Prepare one track per harmonic > 0; ignore index 0
+    m_TrackList.resize(maxHarmonic);
+
+    // TODOOOOO :: remove unecessary freqs (> cutoff oder sogar noch niedriger?)
+
+
+    // 3. Fill tracks
+    for (size_t i = 0; i < m_PeaksOverTime.size(); ++i)
+    {
+        spectrumBuffer = m_Spectrogram.m_Spectrogram[i];
+        Vectormath::convolveSymmetric(spectrumBuffer.m_Level, kernel);
+        m_PeaksOverTime[i] = spectrumBuffer.findPeaks(3.0f, m_Spectrogram.m_Frequency);
+
+        for (const Peak& peak : meanPeaks.m_Peaks)
+        {
+            for (size_t j = 0u; j < m_PeaksOverTime[i].m_Peaks.size(); ++j)
+            {
+                if (std::abs(m_PeaksOverTime[i].m_Peaks[j].PeakFrequency - peak.PeakFrequency) < 0.075f)
+                {
+                    m_PeaksOverTime[i].m_Peaks[j].PeakHarmonicNo = peak.PeakHarmonicNo;
+                    break;
+                }
+            }
+        }
+
+        for (const Peak& peak : m_PeaksOverTime[i].m_Peaks)
+        {
+            if (peak.PeakHarmonicNo > 0)
+            {
+                m_TrackList[peak.PeakHarmonicNo - 1].push_back(
+                    TrackData{ i, peak.PeakFrequency, peak.PeakLevel}
+                );
+            }
+        }
+    }
