@@ -122,3 +122,8 @@ def build_tracks(
                 )
 
     return track_list
+
+# pick harmonic #2
+h2 = tracks[1]
+times = [p.time_idx for p in h2]
+freqs = [p.frequency for p in h2]
