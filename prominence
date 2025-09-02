@@ -1,0 +1,41 @@
+#include <vector>
+#include <algorithm>
+#include <limits>
+
+struct Peak {
+    int index;
+    // other members (e.g. height, width, etc.)
+};
+
+// Removes peaks from ‘peaks’ whose prominence < prominenceThreshold
+void filterPeaksByProminence(
+    std::vector<Peak>& peaks,
+    const std::vector<float>& spectrum,
+    float prominenceThreshold)
+{
+    auto isShallow = [&](const Peak& p) {
+        float h = spectrum[p.index];
+        float leftMin  = h;
+        float rightMin = h;
+
+        // Scan left until a higher point or start
+        for (int j = p.index - 1; j >= 0; --j) {
+            leftMin = std::min(leftMin, spectrum[j]);
+            if (spectrum[j] > h) break;
+        }
+
+        // Scan right until a higher point or end
+        for (int j = p.index + 1, n = spectrum.size(); j < n; ++j) {
+            rightMin = std::min(rightMin, spectrum[j]);
+            if (spectrum[j] > h) break;
+        }
+
+        float prominence = h - std::max(leftMin, rightMin);
+        return prominence < prominenceThreshold;
+    };
+
+    peaks.erase(
+        std::remove_if(peaks.begin(), peaks.end(), isShallow),
+        peaks.end()
+    );
+}
