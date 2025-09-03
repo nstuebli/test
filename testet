@@ -1,58 +1,42 @@
-size_t noThreads = 1u;
-    if (m_Spectrogram.size() > 40)
+void FFT::fft(std::vector<std::complex<float>>& input)
+{
+    const size_t n = input.size();
+    if (n <= 1) return;
+
+    size_t j = 0;
+
+    for (size_t i = 1; i < n; i++)
     {
-        noThreads = std::thread::hardware_concurrency();
+        size_t bit = n >> 1;
+        while (j & bit)
+        {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+
+        if (i < j)
+        {
+            std::swap(input[i], input[j]);
+        }
     }
 
-    std::vector<std::vector<std::complex<float>>> fftBin(noThreads, std::vector<std::complex<float>>(m_SegmentSize, std::complex<float>(0.0f, 0.0f)));
-    size_t chunkSizeTimeSignal = m_InputTimeSignal.size() / noThreads;
-    size_t chunkSizeSpectrogram = m_Spectrogram.size() / noThreads;
-
-    std::vector<std::future<void>> futures;
-
-    for (size_t t = 0; t < noThreads; ++t)
+    for (size_t len = 2; len <= n; len <<= 1)
     {
-        size_t startIdxSpec = t * chunkSizeSpectrogram;
-        size_t endIdxSpec = (t == noThreads - 1) ? m_Spectrogram.size() : startIdxSpec + chunkSizeSpectrogram;
-        size_t startIdxTime = t * chunkSizeTimeSignal;
-        size_t endIdxTime = (t == noThreads - 1) ? m_InputTimeSignal.size() : startIdxTime + chunkSizeTimeSignal;
+        const float ang = static_cast<float>(-2.0f * M_PI / len);
+        std::complex<float> wlen(std::cos(ang), std::sin(ang));
 
-
-        futures.emplace_back(std::async(std::launch::async,
-            &Spectrogram::spectrogramRoutine,
-            this,
-            std::ref(fftBin[t]),
-            startIdxSpec,
-            endIdxSpec,
-            startIdxTime,
-            endIdxTime));
+        for (size_t i = 0; i < n; i += len)
+        {
+            std::complex<float> w(1);
+            for (size_t j = 0; j < len / 2; ++j)
+            {
+                std::complex<float> u = input[i + j];
+                std::complex<float> v = input[i + j + len / 2] * w;
+                input[i + j] = u + v;
+                input[i + j + len / 2] = u - v;
+                w *= wlen;
+            }
+        }
     }
-
-    for (auto& future : futures)
-    {
-        future.get();
-    }
-
-
-for (size_t t = 0; t < noThreads; ++t) {
-    size_t startSpec  = t * chunkSpec;
-    size_t endSpec    = std::min(specSize, startSpec + chunkSpec);
-    size_t startTime  = t * chunkSignal;
-    size_t endTime    = std::min(signalSize, startTime + chunkSignal + m_SegmentSize);
-
-    // Skip if no columns or no data
-    if (startSpec >= endSpec || startTime >= signalSize) 
-        continue;
-
-    // Guarantee we have enough samples to process each segment
-    endTime = std::min(signalSize, endTime);
-
-    futures.emplace_back(std::async(std::launch::async,
-        &Spectrogram::spectrogramRoutine,
-         this,
-         std::ref(fftBin[t]),
-         startSpec,
-         endSpec,
-         startTime,
-         endTime));
 }
