@@ -32,3 +32,27 @@ size_t noThreads = 1u;
     {
         future.get();
     }
+
+
+for (size_t t = 0; t < noThreads; ++t) {
+    size_t startSpec  = t * chunkSpec;
+    size_t endSpec    = std::min(specSize, startSpec + chunkSpec);
+    size_t startTime  = t * chunkSignal;
+    size_t endTime    = std::min(signalSize, startTime + chunkSignal + m_SegmentSize);
+
+    // Skip if no columns or no data
+    if (startSpec >= endSpec || startTime >= signalSize) 
+        continue;
+
+    // Guarantee we have enough samples to process each segment
+    endTime = std::min(signalSize, endTime);
+
+    futures.emplace_back(std::async(std::launch::async,
+        &Spectrogram::spectrogramRoutine,
+         this,
+         std::ref(fftBin[t]),
+         startSpec,
+         endSpec,
+         startTime,
+         endTime));
+}
