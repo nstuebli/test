@@ -1,0 +1,34 @@
+size_t noThreads = 1u;
+    if (m_Spectrogram.size() > 40)
+    {
+        noThreads = std::thread::hardware_concurrency();
+    }
+
+    std::vector<std::vector<std::complex<float>>> fftBin(noThreads, std::vector<std::complex<float>>(m_SegmentSize, std::complex<float>(0.0f, 0.0f)));
+    size_t chunkSizeTimeSignal = m_InputTimeSignal.size() / noThreads;
+    size_t chunkSizeSpectrogram = m_Spectrogram.size() / noThreads;
+
+    std::vector<std::future<void>> futures;
+
+    for (size_t t = 0; t < noThreads; ++t)
+    {
+        size_t startIdxSpec = t * chunkSizeSpectrogram;
+        size_t endIdxSpec = (t == noThreads - 1) ? m_Spectrogram.size() : startIdxSpec + chunkSizeSpectrogram;
+        size_t startIdxTime = t * chunkSizeTimeSignal;
+        size_t endIdxTime = (t == noThreads - 1) ? m_InputTimeSignal.size() : startIdxTime + chunkSizeTimeSignal;
+
+
+        futures.emplace_back(std::async(std::launch::async,
+            &Spectrogram::spectrogramRoutine,
+            this,
+            std::ref(fftBin[t]),
+            startIdxSpec,
+            endIdxSpec,
+            startIdxTime,
+            endIdxTime));
+    }
+
+    for (auto& future : futures)
+    {
+        future.get();
+    }
