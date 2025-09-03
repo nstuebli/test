@@ -2,40 +2,45 @@
 #include <algorithm>
 #include <limits>
 
-struct Peak {
-    int index;
-    // other members (e.g. height, width, etc.)
-};
-
-// Removes peaks from ‘peaks’ whose prominence < prominenceThreshold
-void filterPeaksByProminence(
-    std::vector<Peak>& peaks,
+// Finds indices of peaks whose height and prominence exceed given thresholds
+std::vector<int> findProminentPeaks(
     const std::vector<float>& spectrum,
+    float heightThreshold,
     float prominenceThreshold)
 {
-    auto isShallow = [&](const Peak& p) {
-        float h = spectrum[p.index];
-        float leftMin  = h;
-        float rightMin = h;
+    std::vector<int> peaks;
+    int n = spectrum.size();
+    if (n < 3) return peaks;  // need at least one interior point
 
-        // Scan left until a higher point or start
-        for (int j = p.index - 1; j >= 0; --j) {
+    for (int i = 1; i < n - 1; ++i) {
+        // 1. Height threshold and local maximum test
+        if (spectrum[i] < heightThreshold) 
+            continue;
+        if (spectrum[i] <= spectrum[i - 1] || spectrum[i] <= spectrum[i + 1]) 
+            continue;
+
+        // 2. Walk left to find the lowest valley until a higher point appears
+        float leftMin = spectrum[i];
+        for (int j = i - 1; j >= 0; --j) {
             leftMin = std::min(leftMin, spectrum[j]);
-            if (spectrum[j] > h) break;
+            if (spectrum[j] > spectrum[i]) 
+                break;
         }
 
-        // Scan right until a higher point or end
-        for (int j = p.index + 1, n = spectrum.size(); j < n; ++j) {
+        // 3. Walk right to find the lowest valley until a higher point appears
+        float rightMin = spectrum[i];
+        for (int j = i + 1; j < n; ++j) {
             rightMin = std::min(rightMin, spectrum[j]);
-            if (spectrum[j] > h) break;
+            if (spectrum[j] > spectrum[i]) 
+                break;
         }
 
-        float prominence = h - std::max(leftMin, rightMin);
-        return prominence < prominenceThreshold;
-    };
+        // 4. Prominence calculation
+        float prominence = spectrum[i] - std::max(leftMin, rightMin);
+        if (prominence >= prominenceThreshold) {
+            peaks.push_back(i);
+        }
+    }
 
-    peaks.erase(
-        std::remove_if(peaks.begin(), peaks.end(), isShallow),
-        peaks.end()
-    );
+    return peaks;
 }
