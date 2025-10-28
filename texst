@@ -1,129 +1,129 @@
-void CPAFinder::createTracks()
+void  cWave::readWavData (ifstream &WavFile, unsigned int uiFileSize, eWavError* peiError)
+
+//====================================================================================================================================
 {
-    PeakFinder peakFinder(m_Spectrogram);
-    Peaks meanPeaks = peakFinder.getPeaks(TimeRange{ 0, m_Spectrogram.m_Spectrogram.size() }, 3.0f);
-    Spectrum spectrumBuffer;
-    std::vector<float> kernel = Vectormath::generateGaussianKernel(3.0f);
+//  cout << "cWave::readWavData" << endl;
 
-    // 1. Find highest harmonic number
+  uint32_t  uiFileIdx             = 12;  // First possible fmt-chunk index
+  uint32_t  uiNoOfBytes           = 0;
+  char      chBuffer[8];
+  uint8_t*  pchSamples = nullptr;
+  m_uiNoOfAmplNormSamples         = 0;
+  *peiError = eWAVERROR_NO;
+  std::unique_ptr<float[]>  pdAmplNormSamples;
 
-    for (size_t i = 0u; i < meanPeaks.m_Peaks.size(); ++i)
+  for (uint32_t x = uiFileIdx; x < uiFileSize - 8;)
+  {
+    WavFile.seekg(x);
+
+    // read data as a block:
+    WavFile.read (chBuffer, 8);
+    uint32_t chunkSize = (uint32_t(uint8_t(chBuffer[7])) << 24) + (uint32_t(uint8_t(chBuffer[6])) << 16) + (uint32_t(uint8_t(chBuffer[5])) << 8) + (uint32_t(uint8_t(chBuffer[4])) << 0);
+    x += 8 + chunkSize;
+
+    if ((chBuffer[0] == 'd') &&
+        (chBuffer[1] == 'a') &&
+        (chBuffer[2] == 't') &&
+        (chBuffer[3] == 'a'))
     {
-        meanPeaks.m_Peaks[i].PeakHarmonicNo = i + 1;
-    }
+      uiNoOfBytes = chunkSize;
 
-    int maxHarmonic = 0;
-    for (const Peak& peak : meanPeaks.m_Peaks)
-    {
-        if (peak.PeakHarmonicNo > maxHarmonic)
+      if (uiNoOfBytes > 0)
+      {
+        // Output is ever mono
+        m_uiNoOfAmplNormSamples = uiNoOfBytes / std::ceil(m_iWidth / 8.0) / m_iChannels;
+
+        if (m_uiNoOfAmplNormSamples > MAXAUDIOLENGTH * m_iSampleRate)
         {
-            maxHarmonic = peak.PeakHarmonicNo;
-        }
-    }
+          m_uiNoOfAmplNormSamples = MAXAUDIOLENGTH * m_iSampleRate;
 
-    // 2. Prepare one track per harmonic > 0; ignore index 0
-    m_TrackList.resize(maxHarmonic);
-
-    // TODOOOOO :: remove unecessary freqs (> cutoff oder sogar noch niedriger?)
-
-
-    // 3. Fill tracks
-    for (size_t i = 0; i < m_PeaksOverTime.size(); ++i)
-    {
-        spectrumBuffer = m_Spectrogram.m_Spectrogram[i];
-        Vectormath::convolveSymmetric(spectrumBuffer.m_Level, kernel);
-        m_PeaksOverTime[i] = spectrumBuffer.findPeaks(3.0f, m_Spectrogram.m_Frequency);
-
-        for (const Peak& peak : meanPeaks.m_Peaks)
-        {
-            for (size_t j = 0u; j < m_PeaksOverTime[i].m_Peaks.size(); ++j)
-            {
-                if (std::abs(m_PeaksOverTime[i].m_Peaks[j].PeakFrequency - peak.PeakFrequency) < 0.075f)
-                {
-                    m_PeaksOverTime[i].m_Peaks[j].PeakHarmonicNo = peak.PeakHarmonicNo;
-                    break;
-                }
-            }
+          *peiError = eWAVERROR_TOBIG;
         }
 
-        for (const Peak& peak : m_PeaksOverTime[i].m_Peaks)
-        {
-            if (peak.PeakHarmonicNo > 0)
-            {
-                m_TrackList[peak.PeakHarmonicNo - 1].push_back(
-                    TrackData{ i, peak.PeakFrequency, peak.PeakLevel}
-                );
-            }
-        }
+        // Create buffer for samples
+        // 5760000 double values for 120s @48kHz (probably 8 byte per double -> 46,08 MByte)
+        // 28800000 double values for 600s @48kHz (-> 230,4 MByte)
+        pdAmplNormSamples.reset();
+        pdAmplNormSamples = std::make_unique<float[]>(m_uiNoOfAmplNormSamples);
+        for (uint64_t i = 0; i < m_uiNoOfAmplNormSamples; i++)
+          pdAmplNormSamples[i] = 0.0;
+      }
     }
+  }
+
+  pchSamples = new uint8_t[std::ceil(m_iWidth / 8.0) * m_iChannels];
+  // Convert to mono and normalize to 1.0 (soundcard range)
+  if ((m_eFormat == eWAVFORMAT_LINEAR_PCM))
+  {
+    for (uint64_t x = 0; x < m_uiNoOfAmplNormSamples; x++)
+    {
+      WavFile.read(reinterpret_cast<char*>(pchSamples), std::ceil(m_iWidth / 8.0) * m_iChannels);
+      pdAmplNormSamples[x] = getMonoSamplePcm(pchSamples, m_iWidth, m_iChannels);
+    }
+  }
+  else if ((m_eFormat == eWAVFORMAT_IEEE_FLOAT) && (m_iWidth == 32))
+  {
+    for (uint64_t x = 0; x < m_uiNoOfAmplNormSamples; x++)
+    {
+      WavFile.read(reinterpret_cast<char*>(pchSamples), std::ceil(m_iWidth / 8.0) * m_iChannels);
+      pdAmplNormSamples[x] = getMonoSampleIeee<float>(pchSamples, m_iChannels);
+    }
+  }
+  else if ((m_eFormat == eWAVFORMAT_IEEE_FLOAT) && (m_iWidth == 64))
+  {
+    for (uint64_t x = 0; x < m_uiNoOfAmplNormSamples; x++)
+    {
+      WavFile.read(reinterpret_cast<char*>(pchSamples), std::ceil(m_iWidth / 8.0) * m_iChannels);
+      pdAmplNormSamples[x] = getMonoSampleIeee<double>(pchSamples, m_iChannels);
+    }
+  }
+  delete[] pchSamples;
+  pchSamples = nullptr;
+
+  // Convert to internal samplerate
+  m_uiNoOfFreqNormSamples = uint64_t((double)m_uiNoOfAmplNormSamples / m_dTimeIncr);
+
+  // Create buffer for samples
+  m_pdFreqNormSamples = std::make_unique<float[]>(m_uiNoOfFreqNormSamples);
+  for (uint64_t i = 0; i < m_uiNoOfFreqNormSamples; i++)
+    m_pdFreqNormSamples[i] = 0.0;
+
+  //CZRAW Calculate size of the raw data set which is processes in cSonarFft while FRAMESIZE=1024 audio signals are played.
+  m_fftFrameSize = dataxsdstruct::FRAMESIZE * m_dTimeIncr; //CZRAW
+
+  double  dAmplDiff;
+  double  dTimeDiff;
+  double  dOffset;
+  double  dSampleIdx = 0.0;
+
+  int count = 0;
+  for (uint64_t x = 0; x < m_uiNoOfFreqNormSamples; ++x)
+  {
+    dAmplDiff = pdAmplNormSamples[uint64_t(dSampleIdx) + 1] - pdAmplNormSamples[uint64_t(dSampleIdx)];
+    dTimeDiff = dSampleIdx - uint64_t(dSampleIdx);
+    dOffset   = dAmplDiff * dTimeDiff;
+
+    m_pdFreqNormSamples[x] = pdAmplNormSamples[uint64_t(dSampleIdx)] + dOffset;
+
+    dSampleIdx += m_dTimeIncr;
+    count++;
+  }
+}
 
 
 
 
 
+template <typename T>
+double getMonoSampleIeee (uint8_t const* samples, uint32_t const channels)
 
-
-import numpy as np
-from dataclasses import dataclass
-from typing import List, Callable
-
-@dataclass
-class Peak:
-    PeakFrequency: float
-    PeakLevel: float
-    PeakHarmonicNo: int = 0
-
-@dataclass
-class TrackData:
-    time_idx: int
-    frequency: float
-    level: float
-
-def build_tracks(
-    spectrogram: List[np.ndarray],
-    mean_peaks: List[Peak],
-    find_peaks_fn: Callable[[np.ndarray], List[Peak]],
-    freq_tolerance: float = 0.075
-) -> List[List[TrackData]]:
-    """
-    Port of the C++ logic into Python.  
-    - spectrogram: list of 1D numpy arrays (one per time‐bin)  
-    - mean_peaks:  list of Peaks from the averaged spectrum  
-    - find_peaks_fn: function that returns List[Peak] for one frame  
-    - freq_tolerance: Δf threshold for matching peaks  
-    """
-
-    # 1. Number the master peaks 1..N
-    for idx, peak in enumerate(mean_peaks):
-        peak.PeakHarmonicNo = idx + 1
-
-    # 2. How many harmonics do we have?
-    max_harmonic = max(p.PeakHarmonicNo for p in mean_peaks)
-
-    # 3. Prepare an empty track for each harmonic
-    track_list: List[List[TrackData]] = [[] for _ in range(max_harmonic)]
-
-    # 4. Go through each time‐bin, detect & assign
-    for t_idx, frame in enumerate(spectrogram):
-        frame_peaks = find_peaks_fn(frame)
-
-        # assign each detected peak to the nearest master peak (if within tolerance)
-        for m in mean_peaks:
-            for p in frame_peaks:
-                if abs(p.PeakFrequency - m.PeakFrequency) < freq_tolerance:
-                    p.PeakHarmonicNo = m.PeakHarmonicNo
-                    break
-
-        # fill the tracks
-        for p in frame_peaks:
-            if p.PeakHarmonicNo > 0:
-                track_list[p.PeakHarmonicNo - 1].append(
-                    TrackData(time_idx=t_idx, frequency=p.PeakFrequency, level=p.PeakLevel)
-                )
-
-    return track_list
-
-# pick harmonic #2
-h2 = tracks[1]
-times = [p.time_idx for p in h2]
-freqs = [p.frequency for p in h2]
+//====================================================================================================================================
+{
+  T const* actual_samples = reinterpret_cast<T const*>(samples);
+  double sample = 0;
+  for (uint32_t x = 0; x < channels; ++x)
+  {
+    sample += actual_samples[x];
+  }
+  return (sample / double(channels));
+}
