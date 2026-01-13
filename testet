@@ -1,42 +1,80 @@
-void FFT::fft(std::vector<std::complex<float>>& input)
-{
-    const size_t n = input.size();
-    if (n <= 1) return;
+SCORE_LOG_DEBUG( mTMLogger, std::setfill( ' ' ) );
+	SCORE_LOG_DEBUG( mTMLogger, " " );
+	SCORE_LOG_DEBUG( mTMLogger, std::setw( 4 ) << frData->Track.trackId << "      | " );
 
-    size_t j = 0;
+	if ( frData->Track.trackNumber.trackNumber == 0 )	// own ship
+	{
+		// Type
+		SCORE_LOG_DEBUG( mTMLogger, "     OS | " );
+		// STD STT designation
+		SCORE_LOG_DEBUG( mTMLogger, "    | " );
+		// STD STT Id
+		SCORE_LOG_DEBUG( mTMLogger, "     | " );
+		// STD STT Bearing
+		SCORE_LOG_DEBUG( mTMLogger, "      | " );
+		// AFE STT designation
+		SCORE_LOG_DEBUG( mTMLogger, "    | " );
+		// AFE STT Id
+		SCORE_LOG_DEBUG( mTMLogger, "     | " );
+		// AFE STT Bearing
+		SCORE_LOG_DEBUG( mTMLogger, "      | " );
+		// CMS
+		SCORE_LOG_DEBUG( mTMLogger, "       | " );
+		// CMS Id
+//		SCORE_LOG_DEBUG( mTMLogger, "     | " );  - not used
+		// TMA
+		SCORE_LOG_DEBUG( mTMLogger, "    | " );
+		// TMA Id
+		SCORE_LOG_DEBUG( mTMLogger, "     | " );
 
-    for (size_t i = 1; i < n; i++)
-    {
-        size_t bit = n >> 1;
-        while (j & bit)
-        {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
 
-        if (i < j)
-        {
-            std::swap(input[i], input[j]);
-        }
-    }
+		if ( frData->Track.trackAttrCtrl.trackPositionData.brn.valid )
+		{
+			if ( frData->Track.trackAttrCtrl.trackPositionData.brn.value >= 0.0 )
+			{
+				SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 5 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.brn.value * 180.0/M_PI << " | " );
+			}
+			else
+			{
+				SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 5 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.brn.value * 180.0/M_PI + 360.0 << " | " );
+			}
+		}
+		else
+		{
+			SCORE_LOG_DEBUG( mTMLogger, "     | " );
+		}
+		if ( frData->Track.trackAttrCtrl.trackPositionData.rng.valid )
+		{
+			SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 8 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.rng.value / 1000.0 << " | " );
+		}
+		else
+		{
+			SCORE_LOG_DEBUG( mTMLogger, "         | " );
+		}
+		if ( frData->Track.trackAttrCtrl.trackPositionData.course.valid )
+		{
+			if ( frData->Track.trackAttrCtrl.trackPositionData.course.value >= 0.0 )
+			{
+				SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 5 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.course.value * 180.0/M_PI << " | " );
+			}
+			else
+			{
+				SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 5 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.course.value * 180.0/M_PI + 360.0 << " | " );
+			}
+		}
+		else
+		{
+			SCORE_LOG_DEBUG( mTMLogger, "      | " );
+		}
+		if ( frData->Track.trackAttrCtrl.trackPositionData.speed.valid )
+		{
+			SCORE_LOG_DEBUG( mTMLogger, std::fixed << std::setw( 5 ) << std::setprecision( 1 ) << frData->Track.trackAttrCtrl.trackPositionData.speed.value << " | " );
+		}
+		else
+		{
+			SCORE_LOG_DEBUG( mTMLogger, "      | " );
+		}
 
-    for (size_t len = 2; len <= n; len <<= 1)
-    {
-        const float ang = static_cast<float>(-2.0f * M_PI / len);
-        std::complex<float> wlen(std::cos(ang), std::sin(ang));
-
-        for (size_t i = 0; i < n; i += len)
-        {
-            std::complex<float> w(1);
-            for (size_t j = 0; j < len / 2; ++j)
-            {
-                std::complex<float> u = input[i + j];
-                std::complex<float> v = input[i + j + len / 2] * w;
-                input[i + j] = u + v;
-                input[i + j + len / 2] = u - v;
-                w *= wlen;
-            }
-        }
-    }
-}
+		// main sensor
+		SCORE_LOG_DEBUG( mTMLogger,  "              | " );
+	}
