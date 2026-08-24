@@ -1,24 +1,30 @@
+import numpy as np
+
 class BearingOnlyEKF:
     """
-        Creates EKF object with target state x [x, y, vx, vy] in cartesian coordinates
-        and measurements in bearing relative to own-ship position.
-        Args:
-            dt (float): First number
-            Q (np.array[float]): Process noise covariance
-            R (np.array[float]): Observation noise covariance
-            P0 (np.array[float]): Initial estimation covariance
-            x0 (np.array[float]): Initial estimation mean
+    Extended Kalman Filter for target tracking in Cartesian coordinates [x, y, vx, vy].
+    Supports dynamic measurement modes: 
+      - 'B'    : [Bearing]
+      - 'BR'   : [Bearing, Range]
+      - 'BRCS' : [Bearing, Range, Speed, Course]
     """
-    def __init__(self, dt, x0, P0, Q, R):
+    def __init__(self, dt: float, x0: np.ndarray, P0: np.ndarray, Q: np.ndarray, R_dict: dict):
+        """
+        Args:
+            dt: Time step (seconds)
+            x0: Initial state [x, y, vx, vy] (4x1 or 1D array)
+            P0: Initial covariance matrix (4x4)
+            Q: Process noise covariance matrix (4x4)
+            R_dict: Dictionary mapping measurement types to covariance matrices:
+                    {'B': (1,1), 'BR': (2,2), 'BRCS': (4,4)}
+        """
         self.dt = dt
-
-        # State vector of estimation, init with x0
         self.x = np.array(x0, dtype=float).reshape(4, 1)
-
-        # Covariance of estimation, init with P0
         self.P = np.array(P0, dtype=float)
+        self.Q = np.array(Q, dtype=float)
+        self.R_dict = {key: np.array(val, dtype=float) for key, val in R_dict.items()}
 
-        # Transition matrix for constant velocity modell
+        # Constant Velocity State Transition Matrix (4x4)
         self.F = np.array([
             [1, 0, dt, 0],
             [0, 1, 0, dt],
@@ -26,115 +32,99 @@ class BearingOnlyEKF:
             [0, 0, 0,  1]
         ], dtype=float)
 
-        # Process Q and measrument noise R
-        self.Q = np.array(Q, dtype=float)
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wraps angle to [-pi, pi]."""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
-        self.R_B = R[0]
-        self.R_BR = np.vstack([self.R_B, R[1]])
-        self.R_BRCS = np.vstack([self.R_B, R[1], R[2], R[3]])
-
-    def h(self, x, own_pos, measurement_type='B'):
-        """
-        Observation model. Maps state vector to observation space.
-        Args:
-            x (np.array[float]): Target state vector [px, py, vx, vy].
-            own_pos (np.array[float]): Ownship position [x_o, y_o].
-            measurement_type (str): 'B' (Bearing), 'BR' (Bearing-Range), 'BRCS' (Bearing-Range-Course-Speed).
-        Returns:
-            np.array: Predicted measurement vector.
-        """
+    def h(self, x: np.ndarray, own_pos: np.ndarray, measurement_type: str = 'B') -> np.ndarray:
+        """Observation model mapping state vector to measurement space (returns mx1 array)."""
         px, py, vx, vy = x.flatten()
-        x_o, y_o = own_pos
+        x_o, y_o = own_pos.flatten()
 
         dx = px - x_o
         dy = py - y_o
+
+        bearing = np.arctan2(dy, dx)
+        rng = np.hypot(dx, dy)
 
         if measurement_type == 'B':
-            bearing = math.atan2(dy, dx)
-            return np.array([bearing])
-            
+            return np.array([[bearing]])
+        
         elif measurement_type == 'BR':
-            bearing = math.atan2(dy, dx)
-            rng = math.sqrt(dx*dx + dy*dy)
-            return np.array([bearing, rng])
-            
+            return np.array([[bearing], [rng]])
+        
         elif measurement_type == 'BRCS':
-            bearing = math.atan2(dy, dx)
-            rng = math.sqrt(dx*dx + dy*dy)
-            speed = math.sqrt(vx*vx + vy*vy)
-            course = math.atan2(vy, vx)
-            return np.array([bearing, rng, speed, course])
+            speed = np.hypot(vx, vy)
+            course = np.arctan2(vy, vx)
+            return np.array([[bearing], [rng], [speed], [course]])
+        
+        else:
+            raise ValueError(f"Unknown measurement type: {measurement_type}")
 
-    def H_jacobian(self, x, own_pos, measurement_type='B'):
-        """
-            Jacobian for observation model h() for bearing only measurement
-            Args:
-                x (np.array[float]): State vector [m, m, m/s, m/s]
-                own_pos (np.array[float]): Cartesian position of own ship [m, m]
-            Returns:
-                np.array[float]: Jacobian matrix
-        """
+    def H_jacobian(self, x: np.ndarray, own_pos: np.ndarray, measurement_type: str = 'B') -> np.ndarray:
+        """Computes observation Jacobian matrix H (mx4)."""
         px, py, vx, vy = x.flatten()
-        x_o, y_o = own_pos
+        x_o, y_o = own_pos.flatten()
+        
         dx = px - x_o
         dy = py - y_o
 
-        if (measurement_type == 'B'):
-            r2 = dx*dx + dy*dy
-            if r2 < 1e-8:
-                r2 = 1e-8
-            Hb = np.array([-dy/r2, dx/r2, 0, 0])
+        r2 = dx*dx + dy*dy
+        r2_safe = max(r2, 1e-6)
+        r_safe = np.sqrt(r2_safe)
+
+        # Bearing & Range Jacobians (1x4 each)
+        Hb = np.array([[-dy / r2_safe, dx / r2_safe, 0.0, 0.0]])
+        Hr = np.array([[dx / r_safe, dy / r_safe, 0.0, 0.0]])
+
+        if measurement_type == 'B':
             return Hb
-        elif (measurement_type == 'BR'):
-            r2 = dx*dx + dy*dy
-            if r2 < 1e-8:
-                r2 = 1e-8
-            rng = math.sqrt(r2)
-            Hb = np.array([-dy/r2, dx/r2, 0, 0])
-            Hr = np.array([dx/r, dy/r, 0, 0])
+        elif measurement_type == 'BR':
             return np.vstack([Hb, Hr])
-        elif (measurement_type == 'BRCS'):
-            r2 = dx*dx + dy*dy
-            if r2 < 1e-8:
-                r2 = 1e-8
-            rng = math.sqrt(r2)
-            v = math.sqrt(vx*vx + vy*vy)
-            Hb = np.array([-dy/r2, dx/r2, 0, 0])
-            Hr = np.array([dx/r, dy/r, 0, 0])
-            Hc = np.array([0, 0, -vy/(v*v), vx/(v*v)])
-            Hs = np.array([0, 0, vx/v, vy/v])
-            return np.vstack([Hb, Hr, Hc, Hs])
+        elif measurement_type == 'BRCS':
+            v2 = vx*vx + vy*vy
+            v2_safe = max(v2, 1e-6)
+            v_safe = np.sqrt(v2_safe)
+
+            # Speed & Course Jacobians (1x4 each)
+            Hs = np.array([[0.0, 0.0, vx / v_safe, vy / v_safe]])
+            Hc = np.array([[0.0, 0.0, -vy / v2_safe, vx / v2_safe]])
+
+            return np.vstack([Hb, Hr, Hs, Hc])
+        else:
+            raise ValueError(f"Unknown measurement type: {measurement_type}")
 
     def predict(self):
-        """
-            Propagation of state for one timestep
-        """
+        """Propagates state and covariance forward by dt."""
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
 
-    def update(self, measurement_value, own_pos, measurement_type='B'):
-        """
-            Apply bearing only measurement to state
-            Args:
-                bearing_meas (float): XXX
-                own_pos (np.array[float]): XXX
-        """
-        z = measurement_value
-        z_predicted = self.h(self.x, own_pos, measurement_type)
-        y = z - z_predicted
-        H = self.H_jacobian(self.x, own_pos, measurement_type)
-
-        if (measurement_type == 'B'):
-            y = (y + math.pi) % (2*math.pi) - math.pi
-            S = H @ self.P @ H.T + self.R_B
-        elif (measurement_type == 'BR'):
-            y[0] = (y[0] + math.pi) % (2*math.pi) - math.pi
-            S = H @ self.P @ H.T + self.R_BR
-        elif (measurement_type == 'BRCS'):
-            y[0] = (y[0] + math.pi) % (2*math.pi) - math.pi
-            y[3] = (y[3] + math.pi) % (2*math.pi) - math.pi
-            S = H @ self.P @ H.T + self.R_BRCS
+    def update(self, measurement_value: np.ndarray, own_pos: np.ndarray, measurement_type: str = 'B'):
+        """Applies Kalman update for a given measurement."""
+        z = np.array(measurement_value, dtype=float).reshape(-1, 1)
+        z_pred = self.h(self.x, own_pos, measurement_type)
         
-        K = self.P @ H.T @ np.linalg.inv(S)
+        # Innovation vector (mx1)
+        y = z - z_pred
+
+        # Angle wrapping on bearing (index 0) and course (index 3 if BRCS)
+        y[0, 0] = self._wrap_angle(y[0, 0])
+        if measurement_type == 'BRCS':
+            y[3, 0] = self._wrap_angle(y[3, 0])
+
+        H = self.H_jacobian(self.x, own_pos, measurement_type)
+        R = self.R_dict[measurement_type]
+
+        # Innovation covariance (mxm)
+        S = H @ self.P @ H.T + R
+
+        # Kalman Gain (4xm) using linear solver for numerical stability
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+
+        # State & Covariance Update
         self.x = self.x + K @ y
-        self.P = (np.eye(4) - K @ H) @ self.P
+        I = np.eye(4)
+        
+        # Joseph Form update for guaranteed numerical symmetry/positive definiteness
+        self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ R @ K.T
