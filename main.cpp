@@ -206,3 +206,120 @@ ekf = BearingOnlyEKF(dt=dt, x0=x0, P0=P0, Q=Q, R_dict=R_dict)
 
 
 
+# =====================================================================
+# 2. SIMULATION SETUP
+# =====================================================================
+dt = 1.0
+total_time = 300  # seconds
+steps = int(total_time / dt)
+
+# Maneuver Timing
+maneuver_start = 100.0  # seconds
+maneuver_end = 130.0    # seconds
+
+# Target Ground Truth (Constant Velocity)
+target_pos = np.array([3000.0, 4000.0])  # [East, North] in meters
+target_vel = np.array([-5.0, 2.0])        # [vx, vy] in m/s
+
+# Own-ship Setup
+own_pos = np.array([0.0, 0.0])            # Starts at origin
+own_speed = 8.0                            # 8 m/s (~15.5 knots)
+heading_deg = 0.0                          # Initial heading East (0 deg)
+turn_rate = 90.0 / (maneuver_end - maneuver_start)  # 3 deg/s left turn to North
+
+# Measurement Noise
+sigma_bearing_deg = 1.0  # 1 degree noise
+R_dict_deg = {'B': [[sigma_bearing_deg**2]]}
+
+# EKF Initial Guess (Deliberately wrong range/velocity to test convergence)
+x0_guess = [2000.0, 2500.0, 0.0, 0.0]     # Estimated pos offset by ~2 km
+P0 = np.diag([1500.0**2, 1500.0**2, 10.0**2, 10.0**2])
+Q = np.diag([0.01, 0.01, 0.001, 0.001])
+
+ekf = BearingOnlyEKF(dt=dt, x0=x0_guess, P0=P0, Q=Q, R_dict_deg=R_dict_deg)
+
+# Data logging arrays
+history_target_true = []
+history_own_ship = []
+history_ekf_est = []
+history_pos_error = []
+history_is_maneuvering = []
+
+# =====================================================================
+# 3. MAIN SIMULATION LOOP
+# =====================================================================
+np.random.seed(42)
+
+for i in range(steps):
+    t = i * dt
+    is_maneuvering = maneuver_start <= t <= maneuver_end
+
+    # 1. Update Own-ship Kinetics
+    if is_maneuvering:
+        heading_deg += turn_rate * dt  # Turning toward North (90 deg)
+    
+    heading_rad = np.radians(heading_deg)
+    own_vel = np.array([own_speed * np.cos(heading_rad), own_speed * np.sin(heading_rad)])
+    own_pos += own_vel * dt
+
+    # 2. Update Target Ground Truth
+    target_pos += target_vel * dt
+
+    # 3. EKF Predict Step (Always performed)
+    ekf.predict()
+
+    # 4. EKF Update Step (PAUSED DURING MANEUVER)
+    if not is_maneuvering:
+        # Generate noisy bearing measurement
+        dx = target_pos[0] - own_pos[0]
+        dy = target_pos[1] - own_pos[1]
+        true_bearing_deg = np.degrees(np.arctan2(dy, dx))
+        noisy_bearing_deg = true_bearing_deg + np.random.normal(0, sigma_bearing_deg)
+
+        ekf.update(measurement_value_deg=[noisy_bearing_deg], own_pos=own_pos, measurement_type='B')
+
+    # Logging
+    history_target_true.append(target_pos.copy())
+    history_own_ship.append(own_pos.copy())
+    history_ekf_est.append(ekf.x.flatten().copy())
+    history_is_maneuvering.append(is_maneuvering)
+
+    # Position estimation error
+    est_pos = ekf.x[:2].flatten()
+    history_pos_error.append(np.linalg.norm(target_pos - est_pos))
+
+# =====================================================================
+# 4. VISUALIZATION
+# =====================================================================
+target_true = np.array(history_target_true)
+own_ship = np.array(history_own_ship)
+ekf_est = np.array(history_ekf_est)
+time_vec = np.arange(steps) * dt
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Plot 1: 2D Spatial Trajectory
+ax1.plot(own_ship[:, 0], own_ship[:, 1], 'b-', label='Own-ship Path')
+maneuver_idx = np.where(history_is_maneuvering)[0]
+ax1.plot(own_ship[maneuver_idx, 0], own_ship[maneuver_idx, 1], 'r-', linewidth=3, label='Own-ship Maneuver (Updates Paused)')
+ax1.plot(target_true[:, 0], target_true[:, 1], 'g--', label='Target True Path')
+ax1.plot(ekf_est[:, 0], ekf_est[:, 1], 'm:', label='EKF Estimated Path')
+ax1.scatter(own_ship[0, 0], own_ship[0, 1], color='blue', marker='o', label='Own-ship Start')
+ax1.scatter(target_true[0, 0], target_true[0, 1], color='green', marker='o', label='Target Start')
+ax1.set_title('2D Target Tracking Trajectory')
+ax1.set_xlabel('East [m]')
+ax1.set_ylabel('North [m]')
+ax1.grid(True)
+ax1.legend()
+
+# Plot 2: Position Estimation Error Over Time
+ax2.plot(time_vec, history_pos_error, 'k-', label='Position Error (m)')
+ax2.axvspan(maneuver_start, maneuver_end, color='red', alpha=0.2, label='Maneuver Window')
+ax2.set_title('Target Estimation Error vs Time')
+ax2.set_xlabel('Time [s]')
+ax2.set_ylabel('Position Error [m]')
+ax2.grid(True)
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
