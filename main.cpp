@@ -128,3 +128,81 @@ class BearingOnlyEKF:
         
         # Joseph Form update for guaranteed numerical symmetry/positive definiteness
         self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ R @ K.T
+
+
+class GeoProjection:
+    """Converts between Lat/Lon (deg) and Local ENU Cartesian coordinates (meters)."""
+    R_EARTH = 6371000.0  # Earth radius in meters
+
+    def __init__(self, lat0: float, lon0: float):
+        self.lat0 = np.radians(lat0)
+        self.lon0 = np.radians(lon0)
+        self.cos_lat0 = np.cos(self.lat0)
+
+    def geodetic_to_enu(self, lat: float, lon: float) -> np.ndarray:
+        """Converts (lat, lon) in degrees to [East, North] position in meters."""
+        lat_rad = np.radians(lat)
+        lon_rad = np.radians(lon)
+
+        dlat = lat_rad - self.lat0
+        dlon = lon_rad - self.lon0
+
+        x_east = dlon * self.cos_lat0 * self.R_EARTH
+        y_north = dlat * self.R_EARTH
+        return np.array([x_east, y_north])
+
+    def enu_to_geodetic(self, x_east: float, y_north: float) -> tuple[float, float]:
+        """Converts local [East, North] in meters back to (lat, lon) in degrees."""
+        dlat = y_north / self.R_EARTH
+        dlon = x_east / (self.R_EARTH * self.cos_lat0)
+
+        lat = np.degrees(self.lat0 + dlat)
+        lon = np.degrees(self.lon0 + dlon)
+        return lat, lon
+
+
+# 1. Time step (seconds)
+dt = 1.0
+
+# 2. Initial State Estimate x0: [x, y, vx, vy] in meters and m/s
+x0 = np.array([1000.0, 2000.0, 10.0, -5.0]) 
+
+# 3. Initial Covariance P0 (4x4): Uncertainty in x0
+# e.g., position uncertainty std dev = 50 m (var = 2500), velocity std dev = 5 m/s (var = 25)
+P0 = np.diag([50.0**2, 50.0**2, 5.0**2, 5.0**2])
+
+# 4. Process Noise Covariance Q (4x4): Model uncertainty per time step
+# Represents unmodeled target accelerations (e.g., std dev = 0.1 m/s^2)
+q_var = 0.1**2
+Q = np.diag([0.5 * dt**2 * q_var, 0.5 * dt**2 * q_var, dt * q_var, dt * q_var])
+
+# 5. Measurement Noise Dictionary R_dict
+sigma_bearing = np.radians(1.0)  # 1 degree bearing noise converted to radians
+sigma_range   = 10.0            # 10 meters range noise
+sigma_speed   = 0.5             # 0.5 m/s speed noise
+sigma_course  = np.radians(2.0)  # 2 degrees course noise converted to radians
+
+R_dict = {
+    'B': np.array([
+        [sigma_bearing**2]
+    ]),
+    
+    'BR': np.diag([
+        sigma_bearing**2, 
+        sigma_range**2
+    ]),
+    
+    'BRCS': np.diag([
+        sigma_bearing**2, 
+        sigma_range**2, 
+        sigma_speed**2, 
+        sigma_course**2
+    ])
+}
+
+# Create filter instance
+ekf = BearingOnlyEKF(dt=dt, x0=x0, P0=P0, Q=Q, R_dict=R_dict)
+
+
+
+
