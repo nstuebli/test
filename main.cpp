@@ -741,3 +741,355 @@ class MPCEKF:
 
         I = np.eye(4)
         self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ R @ K.T
+
+==============================================
+import numpy as np
+import matplotlib.pyplot as plt
+
+# =====================================================================
+# 1. MPC EKF CLASS IMPLEMENTATION
+# =====================================================================
+class MPCEKF:
+    def __init__(self, y0: np.ndarray, P0: np.ndarray, Q: np.ndarray, R_dict: dict):
+        self.y = np.array(y0, dtype=float).reshape(4, 1)
+        self.P = np.array(P0, dtype=float)
+        self.Q = np.array(Q, dtype=float)
+        self.R_dict = {key: np.array(val, dtype=float) for key, val in R_dict.items()}
+
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        return (angle_rad + np.pi) % (2 * np.pi) - np.pi
+
+    @staticmethod
+    def cartesian_to_mpc(target_pos: np.ndarray, target_vel: np.ndarray, 
+                         own_pos: np.ndarray, own_vel: np.ndarray) -> np.ndarray:
+        dx = target_pos[0] - own_pos[0]
+        dy = target_pos[1] - own_pos[1]
+        dvx = target_vel[0] - own_vel[0]
+        dvy = target_vel[1] - own_vel[1]
+
+        r2 = max(dx*dx + dy*dy, 1e-6)
+        r = np.sqrt(r2)
+
+        beta = np.arctan2(dy, dx)
+        beta_dot = (dx * dvy - dy * dvx) / r2
+        rho = (dx * dvx + dy * dvy) / r2
+        zeta = 1.0 / r
+
+        return np.array([beta, beta_dot, rho, zeta]).reshape(4, 1)
+
+    def to_cartesian(self, own_pos: np.ndarray, own_vel: np.ndarray) -> np.ndarray:
+        beta, beta_dot, rho, zeta = self.y.flatten()
+        r = 1.0 / max(abs(zeta), 1e-6)
+
+        dx = r * np.cos(beta)
+        dy = r * np.sin(beta)
+        
+        dvx = r * (rho * np.cos(beta) - beta_dot * np.sin(beta))
+        dvy = r * (rho * np.sin(beta) + beta_dot * np.cos(beta))
+
+        return np.array([own_pos[0] + dx, own_pos[1] + dy, own_vel[0] + dvx, own_vel[1] + dvy])
+
+    def _get_target_velocity(self, y: np.ndarray, own_vel: np.ndarray):
+        beta, beta_dot, rho, zeta = y.flatten()
+        v_ox, v_oy = own_vel.flatten()
+
+        zeta_safe = max(abs(zeta), 1e-6)
+        r = 1.0 / zeta_safe
+
+        dvx = r * (rho * np.cos(beta) - beta_dot * np.sin(beta))
+        dvy = r * (rho * np.sin(beta) + beta_dot * np.cos(beta))
+
+        v_tx = v_ox + dvx
+        v_ty = v_oy + dvy
+
+        dv_dy = np.array([
+            [-dvy + v_oy,  -r * np.sin(beta),  r * np.cos(beta),  -dvx / zeta_safe],
+            [ dvx - v_ox,   r * np.cos(beta),  r * np.sin(beta),  -dvy / zeta_safe]
+        ])
+
+        return np.array([v_tx, v_ty]), dv_dy
+
+    def h(self, y: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B') -> np.ndarray:
+        beta, _, _, zeta = y.flatten()
+
+        if measurement_type == 'B':
+            return np.array([[beta]])
+        
+        rng = 1.0 / max(abs(zeta), 1e-6)
+        if measurement_type == 'BR':
+            return np.array([[beta], [rng]])
+        
+        if measurement_type == 'BRCS':
+            if own_vel is None:
+                raise ValueError("own_vel is required for BRCS.")
+            (v_tx, v_ty), _ = self._get_target_velocity(y, own_vel)
+            course = np.arctan2(v_ty, v_tx)
+            speed = np.hypot(v_tx, v_ty)
+            return np.array([[beta], [rng], [course], [speed]])
+
+        raise ValueError(f"Unknown measurement type: {measurement_type}")
+
+    def H_jacobian(self, y: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B') -> np.ndarray:
+        _, _, _, zeta = y.flatten()
+        zeta_safe = max(abs(zeta), 1e-6)
+
+        Hb = np.array([[1.0, 0.0, 0.0, 0.0]])
+        Hr = np.array([[0.0, 0.0, 0.0, -1.0 / (zeta_safe**2)]])
+
+        if measurement_type == 'B':
+            return Hb
+        elif measurement_type == 'BR':
+            return np.vstack([Hb, Hr])
+        elif measurement_type == 'BRCS':
+            if own_vel is None:
+                raise ValueError("own_vel is required for BRCS.")
+            
+            (v_tx, v_ty), dv_dy = self._get_target_velocity(y, own_vel)
+            v2 = max(v_tx**2 + v_ty**2, 1e-6)
+            v_norm = np.sqrt(v2)
+
+            dC_dv = np.array([[-v_ty / v2, v_tx / v2]])
+            Hc = dC_dv @ dv_dy
+
+            dS_dv = np.array([[v_tx / v_norm, v_ty / v_norm]])
+            Hs = dS_dv @ dv_dy
+
+            return np.vstack([Hb, Hr, Hc, Hs])
+
+        raise ValueError(f"Unknown measurement type: {measurement_type}")
+
+    def _dynamics(self, y: np.ndarray, own_accel: np.ndarray) -> np.ndarray:
+        beta, beta_dot, rho, zeta = y.flatten()
+        ax_o, ay_o = own_accel.flatten()
+
+        a_or = -ax_o * np.cos(beta) - ay_o * np.sin(beta)
+        a_ob =  ax_o * np.sin(beta) - ay_o * np.cos(beta)
+
+        d_beta     = beta_dot
+        d_beta_dot = -2.0 * beta_dot * rho + zeta * a_ob
+        d_rho      = beta_dot**2 - rho**2 + zeta * a_or
+        d_zeta     = -rho * zeta
+
+        return np.array([[d_beta], [d_beta_dot], [d_rho], [d_zeta]])
+
+    def _system_jacobian(self, y: np.ndarray, own_accel: np.ndarray) -> np.ndarray:
+        beta, beta_dot, rho, zeta = y.flatten()
+        ax_o, ay_o = own_accel.flatten()
+
+        a_or = -ax_o * np.cos(beta) - ay_o * np.sin(beta)
+        a_ob =  ax_o * np.sin(beta) - ay_o * np.cos(beta)
+
+        A = np.zeros((4, 4))
+        A[0, 1] = 1.0
+        A[1, 0] = -zeta * a_or
+        A[1, 1] = -2.0 * rho
+        A[1, 2] = -2.0 * beta_dot
+        A[1, 3] = a_ob
+
+        A[2, 0] = zeta * a_ob
+        A[2, 1] = 2.0 * beta_dot
+        A[2, 2] = -2.0 * rho
+        A[2, 3] = a_or
+
+        A[3, 2] = -zeta
+        A[3, 3] = -rho
+
+        return A
+
+    def predict(self, dt: float, own_accel: np.ndarray = np.array([0.0, 0.0])):
+        k1 = self._dynamics(self.y, own_accel)
+        k2 = self._dynamics(self.y + 0.5 * dt * k1, own_accel)
+        k3 = self._dynamics(self.y + 0.5 * dt * k2, own_accel)
+        k4 = self._dynamics(self.y + dt * k3, own_accel)
+        
+        self.y += (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        self.y[0, 0] = self._wrap_angle(self.y[0, 0])
+
+        A = self._system_jacobian(self.y, own_accel)
+        F = np.eye(4) + A * dt + 0.5 * (A @ A) * (dt**2)
+
+        self.P = F @ self.P @ F.T + self.Q
+
+    def update(self, measurement_value: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B'):
+        z = np.array(measurement_value, dtype=float).reshape(-1, 1)
+        z_pred = self.h(self.y, own_vel=own_vel, measurement_type=measurement_type)
+
+        y_res = z - z_pred
+        y_res[0, 0] = self._wrap_angle(y_res[0, 0])
+        if measurement_type == 'BRCS':
+            y_res[2, 0] = self._wrap_angle(y_res[2, 0])
+
+        H = self.H_jacobian(self.y, own_vel=own_vel, measurement_type=measurement_type)
+        R = self.R_dict[measurement_type]
+
+        S = H @ self.P @ H.T + R
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+
+        self.y = self.y + K @ y_res
+        self.y[0, 0] = self._wrap_angle(self.y[0, 0])
+
+        I = np.eye(4)
+        self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ R @ K.T
+
+
+# =====================================================================
+# 2. SIMULATION SETUP
+# =====================================================================
+dt = 1.0
+total_time = 15 * 60  # 15 minutes (900 seconds)
+steps = int(total_time / dt)
+
+# Maneuver Timing
+maneuver_start = 120.0
+maneuver_end = 150.0
+turn_duration = maneuver_end - maneuver_start
+
+# Target Ground Truth (Constant Velocity)
+target_pos = np.array([-3000.0, -4000.0])  # [East, North] in meters
+target_vel = np.array([-5.0, 2.0])         # [vx, vy] in m/s
+
+# Own-ship Setup
+own_pos = np.array([0.0, 0.0])             # Starts at origin
+own_speed = 8.0                             # 8 m/s (~15.5 knots)
+heading_deg = 0.0                           # Initial heading East (0 deg)
+turn_rate_deg = 90.0 / turn_duration        # 3 deg/s turn left toward North
+turn_rate_rad = np.radians(turn_rate_deg)
+
+# Measurement Noise Setup
+sigma_B_rad = np.radians(0.2)
+sigma_R = 5.0
+sigma_C_rad = np.radians(1.0)
+sigma_S = 0.2
+
+R_dict = {
+    'B': np.array([[sigma_B_rad**2]]),
+    'BR': np.diag([sigma_B_rad**2, sigma_R**2]),
+    'BRCS': np.diag([sigma_B_rad**2, sigma_R**2, sigma_C_rad**2, sigma_S**2])
+}
+
+# Initial MPC State Construction (Initial Guess)
+# Correct initial bearing, but range guess is wrong (2000m vs ~5000m actual)
+init_bearing = np.arctan2(target_pos[1], target_pos[0])
+init_range_guess = 2000.0
+init_target_pos_guess = np.array([
+    init_range_guess * np.cos(init_bearing),
+    init_range_guess * np.sin(init_bearing)
+])
+init_target_vel_guess = np.array([-4.0, 1.5])
+init_own_vel = np.array([own_speed, 0.0])
+
+y0_guess = MPCEKF.cartesian_to_mpc(
+    target_pos=init_target_pos_guess,
+    target_vel=init_target_vel_guess,
+    own_pos=own_pos,
+    own_vel=init_own_vel
+)
+
+# MPC Covariance and Process Noise
+P0 = np.diag([
+    np.radians(2.0)**2,  # beta variance (rad^2)
+    (1e-3)**2,           # beta_dot variance ((rad/s)^2)
+    (1e-2)**2,           # rho variance ((1/s)^2)
+    (1.0 / 1000.0)**2    # zeta variance ((1/m)^2)
+])
+
+Q = np.diag([1e-7, 1e-8, 1e-8, 1e-10])  # Low process noise for pure CV target
+
+ekf = MPCEKF(y0=y0_guess, P0=P0, Q=Q, R_dict=R_dict)
+
+# Logging
+history_target_true = []
+history_own_ship = []
+history_ekf_cartesian = []
+history_pos_error = []
+history_is_maneuvering = []
+
+# =====================================================================
+# 3. MAIN SIMULATION LOOP
+# =====================================================================
+np.random.seed(42)
+
+for i in range(steps):
+    t = i * dt
+    is_maneuvering = maneuver_start <= t <= maneuver_end
+
+    # 1. Update Own-ship Kinematics & Compute Acceleration
+    if is_maneuvering:
+        heading_deg += turn_rate_deg * dt
+        heading_rad = np.radians(heading_deg)
+        own_vel = np.array([own_speed * np.cos(heading_rad), own_speed * np.sin(heading_rad)])
+        # Centripetal acceleration during turn: a = v * w * [-sin(theta), cos(theta)]
+        own_accel = np.array([
+            -own_speed * turn_rate_rad * np.sin(heading_rad),
+             own_speed * turn_rate_rad * np.cos(heading_rad)
+        ])
+    else:
+        heading_rad = np.radians(heading_deg)
+        own_vel = np.array([own_speed * np.cos(heading_rad), own_speed * np.sin(heading_rad)])
+        own_accel = np.array([0.0, 0.0])
+
+    own_pos += own_vel * dt
+
+    # 2. Update Target Ground Truth
+    target_pos += target_vel * dt
+
+    # 3. EKF Predict Step (Includes Own-ship Acceleration)
+    ekf.predict(dt=dt, own_accel=own_accel)
+
+    # 4. EKF Update Step (PAUSED DURING MANEUVER)
+    if not is_maneuvering:
+        dx = target_pos[0] - own_pos[0]
+        dy = target_pos[1] - own_pos[1]
+        true_bearing_rad = np.arctan2(dy, dx)
+        noisy_bearing_rad = true_bearing_rad + np.random.normal(0, sigma_B_rad)
+
+        ekf.update(measurement_value=[noisy_bearing_rad], own_vel=own_vel, measurement_type='B')
+
+    # Convert state to Cartesian for logging
+    target_est_cartesian = ekf.to_cartesian(own_pos=own_pos, own_vel=own_vel)
+
+    history_target_true.append(target_pos.copy())
+    history_own_ship.append(own_pos.copy())
+    history_ekf_cartesian.append(target_est_cartesian.copy())
+    history_is_maneuvering.append(is_maneuvering)
+
+    # Position Error
+    pos_err = np.linalg.norm(target_pos - target_est_cartesian[:2])
+    history_pos_error.append(pos_err)
+
+# =====================================================================
+# 4. VISUALIZATION
+# =====================================================================
+target_true = np.array(history_target_true)
+own_ship = np.array(history_own_ship)
+ekf_est = np.array(history_ekf_cartesian)
+time_vec = np.arange(steps) * dt
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+# Plot 1: 2D Spatial Trajectory
+ax1.plot(own_ship[:, 0], own_ship[:, 1], 'b-', label='Own-ship Path')
+maneuver_idx = np.where(history_is_maneuvering)[0]
+ax1.plot(own_ship[maneuver_idx, 0], own_ship[maneuver_idx, 1], 'r-', linewidth=3, label='Own-ship Maneuver (Updates Paused)')
+ax1.plot(target_true[:, 0], target_true[:, 1], 'g--', label='Target True Path')
+ax1.plot(ekf_est[:, 0], ekf_est[:, 1], 'm:', label='MPC EKF Estimated Path')
+ax1.scatter(own_ship[0, 0], own_ship[0, 1], color='blue', marker='o', label='Own-ship Start')
+ax1.scatter(target_true[0, 0], target_true[0, 1], color='green', marker='o', label='Target Start')
+ax1.set_title('MPC EKF: 2D Target Tracking Trajectory')
+ax1.set_xlabel('East [m]')
+ax1.set_ylabel('North [m]')
+ax1.grid(True)
+ax1.legend()
+
+# Plot 2: Position Estimation Error Over Time
+ax2.plot(time_vec, history_pos_error, 'k-', label='Position Error (m)')
+ax2.axvspan(maneuver_start, maneuver_end, color='red', alpha=0.2, label='Maneuver Window')
+ax2.set_title('MPC EKF: Target Estimation Error vs Time')
+ax2.set_xlabel('Time [s]')
+ax2.set_ylabel('Position Error [m]')
+ax2.grid(True)
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
