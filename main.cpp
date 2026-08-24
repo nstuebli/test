@@ -527,3 +527,217 @@ ax2.legend()
 
 plt.tight_layout()
 plt.show()
+
+    ================================
+import numpy as np
+
+class MPCEKF:
+    """
+    EKF in Modified Polar Coordinates (MPC) supporting dynamic measurement modes:
+      - 'B'    : [Bearing]
+      - 'BR'   : [Bearing, Range]
+      - 'BRCS' : [Bearing, Range, Course, Speed]
+    
+    State vector y = [beta, beta_dot, rho, zeta]^T:
+      - beta     : Bearing angle [rad]
+      - beta_dot : Bearing rate [rad/s]
+      - rho      : Normalized range rate (r_dot / r) [1/s]
+      - zeta     : Inverse range (1 / r) [1/m]
+    """
+    def __init__(self, y0: np.ndarray, P0: np.ndarray, Q: np.ndarray, R_dict: dict):
+        self.y = np.array(y0, dtype=float).reshape(4, 1)
+        self.P = np.array(P0, dtype=float)
+        self.Q = np.array(Q, dtype=float)
+        self.R_dict = {key: np.array(val, dtype=float) for key, val in R_dict.items()}
+
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        """Wraps angle in radians to [-pi, pi]."""
+        return (angle_rad + np.pi) % (2 * np.pi) - np.pi
+
+    @staticmethod
+    def cartesian_to_mpc(target_pos: np.ndarray, target_vel: np.ndarray, 
+                         own_pos: np.ndarray, own_vel: np.ndarray) -> np.ndarray:
+        """Converts Cartesian positions/velocities to an MPC state vector."""
+        dx = target_pos[0] - own_pos[0]
+        dy = target_pos[1] - own_pos[1]
+        dvx = target_vel[0] - own_vel[0]
+        dvy = target_vel[1] - own_vel[1]
+
+        r2 = max(dx*dx + dy*dy, 1e-6)
+        r = np.sqrt(r2)
+
+        beta = np.arctan2(dy, dx)
+        beta_dot = (dx * dvy - dy * dvx) / r2
+        rho = (dx * dvx + dy * dvy) / r2
+        zeta = 1.0 / r
+
+        return np.array([beta, beta_dot, rho, zeta]).reshape(4, 1)
+
+    def to_cartesian(self, own_pos: np.ndarray, own_vel: np.ndarray) -> np.ndarray:
+        """Converts current MPC state to Cartesian target state [x, y, vx, vy]."""
+        beta, beta_dot, rho, zeta = self.y.flatten()
+        r = 1.0 / max(abs(zeta), 1e-6)
+
+        dx = r * np.cos(beta)
+        dy = r * np.sin(beta)
+        
+        dvx = r * (rho * np.cos(beta) - beta_dot * np.sin(beta))
+        dvy = r * (rho * np.sin(beta) + beta_dot * np.cos(beta))
+
+        return np.array([own_pos[0] + dx, own_pos[1] + dy, own_vel[0] + dvx, own_vel[1] + dvy])
+
+    def _get_target_velocity(self, y: np.ndarray, own_vel: np.ndarray):
+        """Computes Cartesian target velocity [v_tx, v_ty] and its jacobian w.r.t y."""
+        beta, beta_dot, rho, zeta = y.flatten()
+        v_ox, v_oy = own_vel.flatten()
+
+        zeta_safe = max(abs(zeta), 1e-6)
+        r = 1.0 / zeta_safe
+
+        dvx = r * (rho * np.cos(beta) - beta_dot * np.sin(beta))
+        dvy = r * (rho * np.sin(beta) + beta_dot * np.cos(beta))
+
+        v_tx = v_ox + dvx
+        v_ty = v_oy + dvy
+
+        # Derivatives of [v_tx, v_ty] w.r.t y = [beta, beta_dot, rho, zeta]
+        dv_dy = np.array([
+            [-dvy + v_oy,  -r * np.sin(beta),  r * np.cos(beta),  -dvx / zeta_safe],
+            [ dvx - v_ox,   r * np.cos(beta),  r * np.sin(beta),  -dvy / zeta_safe]
+        ])
+
+        return np.array([v_tx, v_ty]), dv_dy
+
+    def h(self, y: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B') -> np.ndarray:
+        """Observation function for 'B', 'BR', and 'BRCS'."""
+        beta, _, _, zeta = y.flatten()
+
+        if measurement_type == 'B':
+            return np.array([[beta]])
+        
+        rng = 1.0 / max(abs(zeta), 1e-6)
+        if measurement_type == 'BR':
+            return np.array([[beta], [rng]])
+        
+        if measurement_type == 'BRCS':
+            if own_vel is None:
+                raise ValueError("own_vel is required to compute Course and Speed in MPC.")
+            (v_tx, v_ty), _ = self._get_target_velocity(y, own_vel)
+            course = np.arctan2(v_ty, v_tx)
+            speed = np.hypot(v_tx, v_ty)
+            return np.array([[beta], [rng], [course], [speed]])
+
+        raise ValueError(f"Unknown measurement type: {measurement_type}")
+
+    def H_jacobian(self, y: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B') -> np.ndarray:
+        """Computes measurement Jacobian matrix H."""
+        _, _, _, zeta = y.flatten()
+        zeta_safe = max(abs(zeta), 1e-6)
+
+        Hb = np.array([[1.0, 0.0, 0.0, 0.0]])
+        Hr = np.array([[0.0, 0.0, 0.0, -1.0 / (zeta_safe**2)]])
+
+        if measurement_type == 'B':
+            return Hb
+        elif measurement_type == 'BR':
+            return np.vstack([Hb, Hr])
+        elif measurement_type == 'BRCS':
+            if own_vel is None:
+                raise ValueError("own_vel is required to compute H for Course and Speed.")
+            
+            (v_tx, v_ty), dv_dy = self._get_target_velocity(y, own_vel)
+            v2 = max(v_tx**2 + v_ty**2, 1e-6)
+            v_norm = np.sqrt(v2)
+
+            # Course Jacobian: dC/dy
+            dC_dv = np.array([[-v_ty / v2, v_tx / v2]])
+            Hc = dC_dv @ dv_dy
+
+            # Speed Jacobian: dS/dy
+            dS_dv = np.array([[v_tx / v_norm, v_ty / v_norm]])
+            Hs = dS_dv @ dv_dy
+
+            return np.vstack([Hb, Hr, Hc, Hs])
+
+        raise ValueError(f"Unknown measurement type: {measurement_type}")
+
+    def _dynamics(self, y: np.ndarray, own_accel: np.ndarray) -> np.ndarray:
+        """Continuous state derivative dy/dt = f(y, a_o)."""
+        beta, beta_dot, rho, zeta = y.flatten()
+        ax_o, ay_o = own_accel.flatten()
+
+        a_or = -ax_o * np.cos(beta) - ay_o * np.sin(beta)
+        a_ob =  ax_o * np.sin(beta) - ay_o * np.cos(beta)
+
+        d_beta     = beta_dot
+        d_beta_dot = -2.0 * beta_dot * rho + zeta * a_ob
+        d_rho      = beta_dot**2 - rho**2 + zeta * a_or
+        d_zeta     = -rho * zeta
+
+        return np.array([[d_beta], [d_beta_dot], [d_rho], [d_zeta]])
+
+    def _system_jacobian(self, y: np.ndarray, own_accel: np.ndarray) -> np.ndarray:
+        """Continuous system Jacobian Matrix A = df/dy."""
+        beta, beta_dot, rho, zeta = y.flatten()
+        ax_o, ay_o = own_accel.flatten()
+
+        a_or = -ax_o * np.cos(beta) - ay_o * np.sin(beta)
+        a_ob =  ax_o * np.sin(beta) - ay_o * np.cos(beta)
+
+        A = np.zeros((4, 4))
+        A[0, 1] = 1.0
+
+        A[1, 0] = -zeta * a_or
+        A[1, 1] = -2.0 * rho
+        A[1, 2] = -2.0 * beta_dot
+        A[1, 3] = a_ob
+
+        A[2, 0] = zeta * a_ob
+        A[2, 1] = 2.0 * beta_dot
+        A[2, 2] = -2.0 * rho
+        A[2, 3] = a_or
+
+        A[3, 2] = -zeta
+        A[3, 3] = -rho
+
+        return A
+
+    def predict(self, dt: float, own_accel: np.ndarray = np.array([0.0, 0.0])):
+        """Propagates state (RK4) and covariance."""
+        k1 = self._dynamics(self.y, own_accel)
+        k2 = self._dynamics(self.y + 0.5 * dt * k1, own_accel)
+        k3 = self._dynamics(self.y + 0.5 * dt * k2, own_accel)
+        k4 = self._dynamics(self.y + dt * k3, own_accel)
+        
+        self.y += (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        self.y[0, 0] = self._wrap_angle(self.y[0, 0])
+
+        A = self._system_jacobian(self.y, own_accel)
+        F = np.eye(4) + A * dt + 0.5 * (A @ A) * (dt**2)
+
+        self.P = F @ self.P @ F.T + self.Q
+
+    def update(self, measurement_value: np.ndarray, own_vel: np.ndarray = None, measurement_type: str = 'B'):
+        """Applies Kalman update for 'B', 'BR', or 'BRCS'."""
+        z = np.array(measurement_value, dtype=float).reshape(-1, 1)
+        z_pred = self.h(self.y, own_vel=own_vel, measurement_type=measurement_type)
+
+        y_res = z - z_pred
+        
+        # Angle wrapping for bearing (index 0) and course (index 2 in BRCS)
+        y_res[0, 0] = self._wrap_angle(y_res[0, 0])
+        if measurement_type == 'BRCS':
+            y_res[2, 0] = self._wrap_angle(y_res[2, 0])
+
+        H = self.H_jacobian(self.y, own_vel=own_vel, measurement_type=measurement_type)
+        R = self.R_dict[measurement_type]
+
+        S = H @ self.P @ H.T + R
+        K = np.linalg.solve(S.T, (self.P @ H.T).T).T
+
+        self.y = self.y + K @ y_res
+        self.y[0, 0] = self._wrap_angle(self.y[0, 0])
+
+        I = np.eye(4)
+        self.P = (I - K @ H) @ self.P @ (I - K @ H).T + K @ R @ K.T
