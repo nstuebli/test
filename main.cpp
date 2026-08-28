@@ -1093,3 +1093,75 @@ ax2.legend()
 
 plt.tight_layout()
 plt.show()
+
+    ======================================================
+import numpy as np
+
+def create_rotated_cartesian_p0(
+    r0: float, 
+    bearing_rad: float, 
+    sigma_r: float, 
+    sigma_bearing_rad: float, 
+    sigma_v_radial: float = 2.0, 
+    sigma_v_cross: float = 2.0
+) -> np.ndarray:
+    """
+    Constructs a 4x4 Cartesian covariance matrix P0 aligned with the Line of Bearing.
+    
+    Parameters:
+      r0: Initial range estimate [m]
+      bearing_rad: Angle from target relative to own-ship [rad]
+      sigma_r: Standard deviation of range guess [m]
+      sigma_bearing_rad: Standard deviation of bearing measurement [rad]
+      sigma_v_radial: Radial velocity uncertainty [m/s]
+      sigma_v_cross: Cross-range velocity uncertainty [m/s]
+    """
+    # 1. Local cross-range position uncertainty
+    sigma_cross_range = r0 * sigma_bearing_rad
+
+    # 2. Local covariance matrices in LOS frame [Radial, Cross-Range]
+    P_pos_local = np.diag([sigma_r**2, sigma_cross_range**2])
+    P_vel_local = np.diag([sigma_v_radial**2, sigma_v_cross**2])
+
+    # 3. Rotation Matrix from LOS frame to Cartesian (East, North)
+    cos_b = np.cos(bearing_rad)
+    sin_b = np.sin(bearing_rad)
+    
+    R = np.array([
+        [cos_b, -sin_b],
+        [sin_b,  cos_b]
+    ])
+
+    # 4. Rotate local covariances into global Cartesian frame
+    P_pos_cart = R @ P_pos_local @ R.T
+    P_vel_cart = R @ P_vel_local @ R.T
+
+    # 5. Assemble full 4x4 State Covariance Matrix
+    P0 = np.zeros((4, 4))
+    P0[0:2, 0:2] = P_pos_cart
+    P0[2:4, 2:4] = P_vel_cart
+
+    return P0
+
+
+# =====================================================================
+# EXAMPLE USAGE (r0 = 21,000 m scenario)
+# =====================================================================
+own_pos = np.array([0.0, 0.0])
+target_pos_guess = np.array([-12610.0, -16780.0])  # ~21 km at ~233 degrees
+
+dx = target_pos_guess[0] - own_pos[0]
+dy = target_pos_guess[1] - own_pos[1]
+
+r0 = np.hypot(dx, dy)                         # 21,000 m
+bearing_rad = np.arctan2(dy, dx)              # ~ -2.21 rad (-126.87 deg)
+
+# Parameters: 50% range uncertainty (10.5 km), 0.2 deg bearing error
+P0 = create_rotated_cartesian_p0(
+    r0=r0,
+    bearing_rad=bearing_rad,
+    sigma_r=10500.0,
+    sigma_bearing_rad=np.radians(0.2),
+    sigma_v_radial=3.0,
+    sigma_v_cross=3.0
+)
